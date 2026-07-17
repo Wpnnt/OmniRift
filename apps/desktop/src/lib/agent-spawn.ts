@@ -13,7 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AgentRole } from "@/types/pty";
 import { ROLE_CLIS, type AgentRoleDef, type RoleCli } from "@/lib/agent-roles";
 import { workerClaudeArgs } from "@/lib/agent-contract";
-import { agentMcpConfig, agentSettingsConfig } from "@/lib/mcp-client";
+import { agentMcpConfig, agentOpencodeMcpConfig, agentSettingsConfig } from "@/lib/mcp-client";
 import { loadGlobalSkills } from "@/lib/global-skills";
 import { type SkillWiring } from "@/lib/agent-skills";
 import { getFlag } from "@/lib/feature-flags";
@@ -30,6 +30,7 @@ export interface RoleSpawn {
   role: AgentRole;
   firstMessage?: string;
   compressor?: string;
+  label?: string;
 }
 
 /**
@@ -82,6 +83,8 @@ export async function buildRoleSpawn(
     return { command: cli.command, role: cli.role };
   }
 
+  const label = role.name;
+
   const { command, prefixArgs } = resolveRoleCommand(role, cli.command);
 
   // União das skills GLOBAIS (todo agente recebe) com as do role/override. Vazio →
@@ -104,11 +107,20 @@ export async function buildRoleSpawn(
   // → [] (fail-soft). Espelha o `cli.role !== "shell"` do spawnRole, já garantido acima.
   const swEnv: Array<[string, string]> =
     getFlag("omniswitch") ? await omniswitchEnv().catch(() => []) : [];
-  const combinedEnv = [...skillEnv, ...swEnv];
+
+  // OpenCode: MCP omnirift-agents via OPENCODE_CONFIG (formato próprio, não --mcp-config).
+  // Fail-soft: sem path → opencode sobe sem tools de orquestração (igual antes).
+  const openCodeEnv: Array<[string, string]> = [];
+  if (cli.role === "opencode") {
+    const ocPath = await agentOpencodeMcpConfig().catch(() => null);
+    if (ocPath) openCodeEnv.push(["OPENCODE_CONFIG", ocPath]);
+  }
+
+  const combinedEnv = [...skillEnv, ...swEnv, ...openCodeEnv];
   const env = combinedEnv.length > 0 ? combinedEnv : undefined;
   const compressor = role.compressor ?? loadDefaultCompressor();
 
-  // MCP por-role: role com curadoria (mcpServers definido) → agent-mcp FILTRADO;
+  // MCP por-role (Claude): role com curadoria (mcpServers definido) → agent-mcp FILTRADO;
   // undefined → global de sempre. Fallback ao path passado pelo chamador.
   const roleMcpPath =
     role.mcpServers !== undefined
@@ -126,6 +138,7 @@ export async function buildRoleSpawn(
       env,
       compressor,
       firstMessage,
+      label,
     };
   }
 
@@ -140,11 +153,12 @@ export async function buildRoleSpawn(
       role: cli.role,
       env,
       compressor,
+      label,
     };
   }
 
   // CLI sem flag de system-prompt (codex/opencode/antigravity): persona (+ indexText das
-  // skills) vai como 1ª mensagem quando o terminal fica ready.
+  // skills) vai como 1ª mensagem quando o terminal fica ready. Opencode já leva MCP no env.
   const firstMessage = indexText ? `${role.prompt}\n\n${indexText}` : role.prompt;
   return {
     command,
@@ -153,5 +167,6 @@ export async function buildRoleSpawn(
     env,
     compressor,
     firstMessage,
+    label,
   };
 }

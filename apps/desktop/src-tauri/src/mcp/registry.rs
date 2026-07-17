@@ -9,6 +9,9 @@ pub struct AgentEntry {
     /// Nome do floor onde o agente vive — dá ao Orquestrador a topologia
     /// cross-floor (quem está em qual branch). `None` = floor desconhecido.
     pub floor: Option<String>,
+    /// CLI/role do agente (opencode/claude-code/codex/shell). Usado pelo
+    /// resolve_group pra casar @role:X (ex: @role:opencode → todos opencode).
+    pub role: Option<String>,
 }
 
 /// Mapeia label de agente → (session_id PTY, description, floor).
@@ -28,8 +31,19 @@ impl AgentRegistry {
         description: String,
         floor: Option<String>,
     ) {
-        log::info!("MCP: agente '{}' registrado ({})", label, &session_id[..8.min(session_id.len())]);
-        self.0.insert(label, AgentEntry { session_id, description, floor });
+        self.register_with_role(label, session_id, description, floor, None);
+    }
+
+    pub fn register_with_role(
+        &self,
+        label: String,
+        session_id: SessionId,
+        description: String,
+        floor: Option<String>,
+        role: Option<String>,
+    ) {
+        log::info!("MCP: agente '{}' registrado ({}, role={:?})", label, &session_id[..8.min(session_id.len())], role);
+        self.0.insert(label, AgentEntry { session_id, description, floor, role });
     }
 
     pub fn unregister(&self, label: &str) -> Option<SessionId> {

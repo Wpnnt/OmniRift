@@ -52,6 +52,16 @@ export async function agentMcpConfig(allowed?: string[]): Promise<string | null>
   return invoke<string | null>("agent_mcp_config", allowed ? { allowed } : undefined);
 }
 
+/**
+ * Caminho do `agent-opencode-mcp.json` (formato OpenCode: chave `mcp`, bridge
+ * local via mcp-remote → SSE do OmniRift). Injetado no spawn do opencode via
+ * env `OPENCODE_CONFIG` — merge, não sobrescreve model/provider do usuário.
+ * Null se indisponível.
+ */
+export async function agentOpencodeMcpConfig(): Promise<string | null> {
+  return invoke<string | null>("agent_opencode_mcp_config");
+}
+
 /** Um MCP server disponível + custo estimado de contexto (tokens de schema). */
 export interface McpInventoryItem {
   key: string;

@@ -44,8 +44,33 @@ pub fn mcp_server_url(
 
 /// Monta a URL SSE (loopback) com o token de auth embutido. Fonte única usada pelo
 /// comando `mcp_server_url` e pelo `agent_mcp_config` (entrada `omnirift-agents`).
-fn mcp_sse_url(token: &str) -> String {
+pub fn mcp_sse_url(token: &str) -> String {
     format!("http://127.0.0.1:{}/sse?token={}", crate::mcp::MCP_PORT, token)
+}
+
+/// Escreve `agent-opencode-mcp.json` no `dir` e devolve o path. Usado pelo comando
+/// Tauri e pelo `agent.spawn` da CLI (injetar OPENCODE_CONFIG no PTY opencode).
+pub fn write_opencode_mcp_config(dir: &std::path::Path, token: &str) -> Option<String> {
+    let url = mcp_sse_url(token);
+    let cfg = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "omnirift-agents": {
+                "type": "local",
+                "command": ["npx", "-y", "mcp-remote", url],
+                "enabled": true
+            }
+        }
+    });
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join("agent-opencode-mcp.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&cfg).ok()?).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(path.to_string_lossy().to_string())
 }
 
 /// Salva uma imagem colada (Ctrl+V) em arquivo PNG temporário e devolve o caminho.
@@ -310,6 +335,24 @@ pub fn agent_mcp_config(
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Some(path.to_string_lossy().to_string())
+}
+
+/// Config OpenCode (`opencode.json`) só com o MCP `omnirift-agents` — o orquestrador
+/// / worker opencode ganha `terminal_*` / `memory_*` / `claim_*` sem sujar o
+/// `~/.config/opencode/opencode.json` do usuário. Injetado via env `OPENCODE_CONFIG`
+/// no spawn (merge na precedence do opencode, entre global e project).
+///
+/// Usa bridge **local** `npx mcp-remote <sse>` (mesmo do ACP): o client MCP do
+/// opencode fala stdio; o server OmniRift é SSE clássico. Remote SSE direto falha
+/// em mismatch de transport (mesmo motivo do Hermes toolless).
+#[tauri::command]
+pub fn agent_opencode_mcp_config(
+    app: tauri::AppHandle,
+    mcp_token: State<'_, std::sync::Arc<crate::mcp::server::McpAuthToken>>,
+) -> Option<String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().ok()?;
+    write_opencode_mcp_config(&dir, &mcp_token.0)
 }
 
 /// Um MCP server que o [`agent_mcp_config`] injetaria, com estimativa de custo de

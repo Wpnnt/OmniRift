@@ -29,6 +29,18 @@ export interface PtySpawnConfig {
    * ADITIVO — `undefined`/`false` = caminho de spawn original, intocado.
    */
   attach?: boolean;
+  /**
+   * Label do agente pra registro no AgentRegistry (orquestração via MCP).
+   * `undefined` = não registra (shell puro ou agente sem label). Setado quando
+   * CLI != "shell" — opencode/claude/codex/etc ficam orquestráveis via
+   * terminal_send_text/@label. Campo opcional: spawn sem label = back-compat.
+   */
+  label?: string;
+  /**
+   * Role do agente (opencode/claude-code/codex/etc) pra filtro @role:X.
+   * `undefined` = shell ou role desconhecido. Usado pelo resolve_group do MCP.
+   */
+  role?: string;
 }
 
 /** Evento emitido pelo Rust quando o PTY produz output. */

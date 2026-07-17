@@ -56,6 +56,10 @@ export function spawnConfigFromNode(n: TerminalNode): PtySpawnConfig {
     cwd: n.cwd,
     env: n.env,
     execution_host: n.executionHost,
+    // Registry MCP: label + role → terminal_list / terminal_run / @role:opencode.
+    // Shell puro sem label fica de fora (não orquestrável).
+    label: n.label,
+    role: n.role !== "shell" ? n.role : undefined,
   };
 }
 
