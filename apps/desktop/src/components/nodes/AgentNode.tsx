@@ -394,7 +394,7 @@ function AgentNodeImpl({ data, selected }: AgentNodeProps) {
   // compartilham sessão (session/load é por-adapter) → força session/new e RE-INJETA a persona
   // no novo ready (personaSentRef=false). A conversa anterior se perde — mesmo custo do reload
   // sem resume. É o escape-hatch de contexto: "Sonnet cheio → Kimi 1M, continua Arquiteto."
-  function changeProvider(next: "claude" | "codex" | "hermes") {
+  function changeProvider(next: "claude" | "codex" | "hermes" | "opencode") {
     if (next === (data.provider ?? "claude")) return;
     // F2: limpa também o acpSessionId PERSISTIDO — session/load é por-adapter; deixar o id
     // velho faria o próximo spawn tentar resumir uma sessão de OUTRO motor.
@@ -1177,7 +1177,7 @@ function AgentNodeImpl({ data, selected }: AgentNodeProps) {
         <span className="font-semibold text-text">{data.label ?? "OmniAgent"}</span>
         <select
           value={data.provider ?? "claude"}
-          onChange={(e) => changeProvider(e.target.value as "claude" | "codex" | "hermes")}
+          onChange={(e) => changeProvider(e.target.value as "claude" | "codex" | "hermes" | "opencode")}
           onPointerDown={(e) => e.stopPropagation()}
           title={t("agent.pickProvider", "Trocar o MOTOR (adapter ACP) mantendo a persona — abre uma conversa nova")}
           className="nodrag rounded bg-transparent px-0.5 text-[10px] uppercase text-text/40 outline-none hover:bg-white/5 focus:bg-black/40"
@@ -1185,6 +1185,7 @@ function AgentNodeImpl({ data, selected }: AgentNodeProps) {
           <option value="claude">claude</option>
           <option value="codex">codex</option>
           <option value="hermes">hermes</option>
+          <option value="opencode">opencode</option>
         </select>
         <StatusBadge status={status} />
         <div className="flex-1" />
@@ -1604,7 +1605,7 @@ function AgentHelp({ provider }: { provider: string }) {
         <li>Se ele pedir permissão pra uma ação, você aprova ou nega aqui mesmo.</li>
       </ul>
       <p className="text-text/40">
-        Provider: {provider} · roda o mesmo Claude/Codex, mas como sessão estruturada — não é um terminal PTY.
+        Provider: {provider} · sessão ACP estruturada (claude / codex / hermes / opencode) — não é terminal PTY.
       </p>
     </div>
   );

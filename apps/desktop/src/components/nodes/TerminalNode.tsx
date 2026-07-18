@@ -23,7 +23,7 @@ import { ptyWrite } from "@/lib/pty-client";
 import { copyText, pasteText, readClipboardPng, savePastePng, MAX_PASTE_BYTES, utf8ByteLength } from "@/lib/clipboard";
 import { compressorSavings, isCompressorEnabled, type SavingsReport } from "@/lib/compress-client";
 import { CLI_CATALOG, clisList, type CliInfo } from "@/lib/clis-client";
-import { agentMcpConfig, agentOpencodeMcpConfig, agentSettingsConfig } from "@/lib/mcp-client";
+import { agentMcpConfig, agentOpencodeMcpConfig, agentSettingsConfig, mcpRenameAgentBySession } from "@/lib/mcp-client";
 import { ROLE_CLIS, extractPersona, buildCliSwitch, loadRoles, type AgentRoleDef } from "@/lib/agent-roles";
 import { buildRoleSpawn } from "@/lib/agent-spawn";
 import { cn } from "@/lib/cn";
@@ -439,10 +439,37 @@ function TerminalNodeBase({ id, data, selected }: TerminalNodeProps) {
 
   function commitRename() {
     const label = draft.trim() || data.command;
+    const prev = data.label ?? data.command;
     renameNode(id, label);
     setDraft(label);
     setEditing(false);
+    // Sync AgentRegistry/ACP: o Orquestrador resolve por label — renomear só no
+    // canvas deixava "Nome" invisível em terminal_list (ficava o nome antigo).
+    if (label !== prev) {
+      mcpRenameAgentBySession(data.session_id, label).catch(console.warn);
+      // Âncora de re-link pós-restart (omnirift-mcp-labels) também usa o label.
+      try {
+        const raw = localStorage.getItem("omnirift-mcp-labels");
+        if (raw) {
+          const keys: string[] = JSON.parse(raw);
+          const i = keys.indexOf(prev);
+          if (i >= 0) {
+            keys[i] = label;
+            localStorage.setItem("omnirift-mcp-labels", JSON.stringify(keys));
+          }
+        }
+      } catch { /* ignore */ }
+    }
   }
+
+  // Se o label do canvas mudou (rename, restore, patch) e a sessão está no registry
+  // com outro nome, alinha. Cobre o caso "já renomeei mas o MCP ficou
+  // com OpenCode" sem precisar renomear de novo.
+  useEffect(() => {
+    const label = (data.label ?? "").trim();
+    if (!label || !data.session_id) return;
+    mcpRenameAgentBySession(data.session_id, label).catch(() => {});
+  }, [data.label, data.session_id]);
 
   // Coloca o xterm no destino certo, por prioridade: fullscreen > dock (se for o
   // Orquestrador) > slot do próprio nó. Move o ELEMENTO (appendChild) — nunca

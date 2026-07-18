@@ -353,3 +353,23 @@ export function saveRoles(roles: AgentRoleDef[]): void {
     /* ignore */
   }
 }
+
+const DEFAULT_CLI_KEY = "omnirift-default-cli";
+
+/** Le o CLI padrao (id do ROLE_CLIS). Default: claude. */
+export function getDefaultCli(): string {
+  try {
+    return localStorage.getItem(DEFAULT_CLI_KEY) ?? "claude";
+  } catch {
+    return "claude";
+  }
+}
+
+/** Define o CLI padrao para novos agentes/roles. */
+export function setDefaultCli(cliId: string): void {
+  try {
+    localStorage.setItem(DEFAULT_CLI_KEY, cliId);
+  } catch {
+    /* ignore */
+  }
+}

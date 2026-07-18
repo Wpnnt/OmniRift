@@ -1,7 +1,7 @@
 use crate::db::Db;
 use crate::mcp::{registry::to_tool_name, AgentRegistry};
 use crate::proc_ext::NoWindow;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 pub fn mcp_register_agent(
@@ -9,9 +9,10 @@ pub fn mcp_register_agent(
     session_id: String,
     description: String,
     floor: Option<String>,
+    role: Option<String>,
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
-    registry.register(label, session_id, description, floor);
+    registry.register_with_role(label, session_id, description, floor, role);
 }
 
 #[tauri::command]
@@ -20,6 +21,24 @@ pub fn mcp_unregister_agent(
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
     registry.unregister(&label);
+}
+
+/// Renomeia o agente no registry MCP (e ACP, se for OmniAgent) pela sessão.
+/// Chamado quando o usuário renomeia o nó no canvas — sem isto o `terminal_list`
+/// e o fuzzy de `agent_ask` continuam com o nome antigo ("OpenCode") e o Orquestrador
+/// não acha.
+#[tauri::command]
+pub fn mcp_rename_agent_by_session(
+    session_id: String,
+    new_label: String,
+    registry: State<'_, std::sync::Arc<AgentRegistry>>,
+    app: tauri::AppHandle,
+) -> Option<String> {
+    let mcp_old = registry.rename_by_session(&session_id, &new_label);
+    let acp_old = app
+        .try_state::<std::sync::Arc<crate::acp::AcpManager>>()
+        .and_then(|m| m.rename_label_by_session(&session_id, &new_label));
+    mcp_old.or(acp_old)
 }
 
 #[tauri::command]

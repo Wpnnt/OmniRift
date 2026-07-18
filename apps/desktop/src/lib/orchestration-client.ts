@@ -6,7 +6,7 @@
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useCanvasStore } from "@/store/canvas-store";
-import { floorMirrorSet, canvasAgentsSet, agentMcpConfig, agentSettingsConfig, mcpRegisterAgent } from "@/lib/mcp-client";
+import { floorMirrorSet, canvasAgentsSet, agentMcpConfig, agentSettingsConfig, mcpRegisterAgent, openCodeOrchestrationEnv } from "@/lib/mcp-client";
 import { parallelGitCreate } from "@/lib/git-client";
 import { workerClaudeArgs } from "@/lib/agent-contract";
 import { ROLE_CLIS } from "@/lib/agent-roles";
@@ -76,15 +76,30 @@ export async function initOrchestrationBridge(): Promise<UnlistenFn> {
         )
       : undefined;
 
+  /** Env de orquestração por role (OpenCode → OPENCODE_CONFIG). */
+  const devEnv = async (role: AgentRole, command?: string) => {
+    const isOc =
+      role === "opencode" ||
+      (command ? /\bopencode\b/i.test(command) : false);
+    if (!isOc) return undefined;
+    const env = await openCodeOrchestrationEnv();
+    return env.length ? env : undefined;
+  };
+
   const unSpawn = await listen<SpawnRequest>("canvas://spawn-request", async (event) => {
     const p = event.payload;
-    const role = asRole(p.role);
+    // role vazio + command=opencode → asRole("shell") errava; infere do command.
+    const role =
+      p.role && (VALID_ROLES as string[]).includes(p.role)
+        ? asRole(p.role)
+        : roleFromCommand(p.command);
     store().addTerminal({
       id: p.id,
       command: p.command,
       args: await devArgs(role, p.label),
       label: p.label,
       role,
+      env: await devEnv(role, p.command),
       position: p.position ?? undefined,
     });
     // Linha ao Orquestrador — paridade com os demais caminhos de spawn (botão da
@@ -150,8 +165,18 @@ export async function initOrchestrationBridge(): Promise<UnlistenFn> {
       }
     }
     store().createParallel(p.branch, gitOpts);
-    const role = asRole(p.role);
-    store().addTerminal({ id: p.id, command: p.command, args: await devArgs(role, p.label), label: p.label, role });
+    const role =
+      p.role && (VALID_ROLES as string[]).includes(p.role)
+        ? asRole(p.role)
+        : roleFromCommand(p.command);
+    store().addTerminal({
+      id: p.id,
+      command: p.command,
+      args: await devArgs(role, p.label),
+      label: p.label,
+      role,
+      env: await devEnv(role, p.command),
+    });
   });
 
   // Wake de agente dormindo (tool agent_wake, task #10): o backend só conhece
@@ -208,8 +233,23 @@ export async function initOrchestrationBridge(): Promise<UnlistenFn> {
             await agentSettingsConfig(p.name).catch(() => null),
           )
         : undefined;
-    s.addTerminal({ id, command: cliDef.command, args, label: p.name, role: cliDef.role });
-    mcpRegisterAgent(p.name, id, persona.slice(0, 120) || `Agente ${p.name}`, undefined).catch(console.warn);
+    const env =
+      cliDef.role === "opencode" ? await openCodeOrchestrationEnv() : undefined;
+    s.addTerminal({
+      id,
+      command: cliDef.command,
+      args,
+      label: p.name,
+      role: cliDef.role,
+      env: env?.length ? env : undefined,
+    });
+    mcpRegisterAgent(
+      p.name,
+      id,
+      persona.slice(0, 120) || `Agente ${p.name}`,
+      undefined,
+      cliDef.role,
+    ).catch(console.warn);
     const orchSid = s.orchestratorSid;
     if (orchSid && orchSid !== id) s.addEdge(orchSid, id, "generic");
     // Sincroniza o checkbox "MCP AGENTS" do Sidebar (estado local do componente).
@@ -239,8 +279,23 @@ export async function initOrchestrationBridge(): Promise<UnlistenFn> {
     const s = useCanvasStore.getState();
     // Só os floors do projeto ATIVO — o orquestrador opera no projeto corrente.
     const pf = s.parallels.filter((f) => f.projectId === s.activeProjectId);
+    // Inclui labels dos terminais: rename no canvas deve atualizar o espelho mobile
+    // (agents.list) — antes a sig só contava nodes.length e o nome antigo ficava.
     const sig =
-      s.activeProjectId + "|" + s.activeParallelId + "|" + pf.map((f) => `${f.id}:${f.name}:${f.nodes.length}`).join(",");
+      s.activeProjectId +
+      "|" +
+      s.activeParallelId +
+      "|" +
+      pf
+        .map(
+          (f) =>
+            `${f.id}:${f.name}:` +
+            f.nodes
+              .filter((n) => n.kind === "terminal")
+              .map((n) => (n.kind === "terminal" ? `${n.session_id}=${n.label ?? n.command}` : ""))
+              .join(","),
+        )
+        .join("|");
     if (sig === lastSig) return;
     lastSig = sig;
     floorMirrorSet(

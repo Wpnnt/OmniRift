@@ -17,6 +17,7 @@ import { open as openExternal } from "@tauri-apps/plugin-shell";
 
 import { useLicenseStore } from "@/store/license-store";
 import { useI18n, useT, type Locale } from "@/lib/i18n";
+import { ROLE_CLIS, getDefaultCli, setDefaultCli } from "@/lib/agent-roles";
 
 const PRICING_URL = "https://omnirift.omniforge.com.br/";
 
@@ -168,6 +169,13 @@ function GeneralTab({ openTool }: { openTool: (tool: string) => void }) {
   const t = useT();
   const locale = useI18n((s) => s.locale);
   const setLocale = useI18n((s) => s.setLocale);
+  const [defaultCli, setDefaultCliState] = useState(getDefaultCli());
+
+  function changeDefaultCli(cliId: string) {
+    setDefaultCli(cliId);
+    setDefaultCliState(cliId);
+  }
+
   return (
     <div className="space-y-4">
       <span className="text-sm font-semibold text-text">{t("settings.general", "Geral")}</span>
@@ -183,6 +191,30 @@ function GeneralTab({ openTool }: { openTool: (tool: string) => void }) {
             {l === "pt" ? "Português" : "English"}
           </button>
         ))}
+      </div>
+
+      <div>
+        <label className="text-[11px] uppercase tracking-wider text-textMuted block mb-2">
+          {t("settings.defaultCli", "CLI Padrão")}
+        </label>
+        <div className="grid grid-cols-2 gap-2">
+          {ROLE_CLIS.filter((c) => c.id !== "shell").map((cli) => (
+            <button
+              key={cli.id}
+              onClick={() => changeDefaultCli(cli.id)}
+              className={
+                "px-3 py-2 rounded border text-[11px] text-left transition-colors " +
+                (defaultCli === cli.id ? "border-brand bg-brand/10 text-brand" : "border-border text-textMuted hover:text-text hover:border-brand/50")
+              }
+            >
+              <div className="font-medium">{cli.label}</div>
+              <div className="text-[10px] opacity-70">{cli.command}</div>
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-textMuted mt-2">
+          {t("settings.defaultCliDesc", "CLI usado em novos agentes e roles. Você pode mudar por agente depois.")}
+        </p>
       </div>
 
       <button onClick={() => openTool("appearance")} className="flex items-center gap-2 w-full px-3 py-2 rounded-md border border-border text-left hover:border-brand transition-colors">

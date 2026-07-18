@@ -16,7 +16,7 @@ export interface HermesSpawnConfig {
   baseUrl?: string;
 }
 
-/** Spawna o adapter ACP do provider (claude|codex|hermes) e inicia o handshake.
+/** Spawna o adapter ACP do provider (claude|codex|hermes|opencode) e inicia o handshake.
  *  `resumeSessionId`: se passado, o backend faz session/load (resume a conversa) em vez de
  *  session/new → recarrega .claude/agents MANTENDO a conversa.
  *  `providerConfig`: só p/ Hermes (BYOK) → o backend injeta HERMES_INFERENCE_* + <PROV>_API_KEY. */
