@@ -7,6 +7,7 @@ Sessões se registram criando $FAILBASE_HOME/watch/<session_id>.json.
 """
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -20,7 +21,24 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 import failbase
 
-STALE_MIN_DEFAULT = 20
+def _stale_min():
+    """Minutos sem escrita no transcript para considerar um turno travado.
+
+    Sobe de 20 para 40 porque o transcript só recebe o resultado de uma ferramenta
+    QUANDO ELA TERMINA: um build ou uma suíte de testes longa deixa o arquivo parado
+    o tempo todo da execução, sem que nada esteja travado. Com 20 min, um turno
+    saudável rodando um build pesado seria morto. Ajustável por env pra quem tem
+    ferramenta ainda mais lenta, sem editar código. Valor inválido cai no default —
+    config quebrada não pode derrubar o watchdog.
+    """
+    try:
+        v = int(os.environ.get("FAILPROOF_STALE_MIN", "40"))
+        return v if v > 0 else 40
+    except (TypeError, ValueError):
+        return 40
+
+
+STALE_MIN_DEFAULT = _stale_min()
 LOOP_REPEATS = 3
 
 
@@ -99,6 +117,11 @@ class Executor:
         self.notify_fn = notify_fn
 
     def kill(self, pid):
+        # pid <= 0 tem semântica especial no os.kill (0 = process group do caller —
+        # SIGTERMaria o próprio watchdog; -1 = todos). Registro sem pid → não mata nada.
+        if not isinstance(pid, int) or pid <= 0:
+            self.actions.append(("kill_skipped", pid))
+            return
         self.actions.append(("kill", pid))
         if not self.dry_run:
             try:
@@ -109,7 +132,13 @@ class Executor:
     def relaunch(self, cmd, postmortem_path):
         self.actions.append(("relaunch", cmd))
         if not self.dry_run and cmd:
-            subprocess.Popen(cmd.format(postmortem=postmortem_path), shell=True)
+            # shell=True é intencional — `cmd` é um TEMPLATE de shell que o dono escreve na
+            # config (pode ter pipe/redirect). O que NÃO era intencional: interpolar o path
+            # cru dentro dessa linha. O path é gerado internamente hoje, mas ele carrega o
+            # session_id, que vem de fora; um `;` ali viraria comando. shlex.quote fecha isso
+            # sem tirar do dono a liberdade de escrever o comando dele.
+            # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
+            subprocess.Popen(cmd.format(postmortem=shlex.quote(postmortem_path)), shell=True)
 
     def notify(self, msg):
         self.actions.append(("notify", msg))

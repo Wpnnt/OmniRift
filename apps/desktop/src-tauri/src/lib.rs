@@ -1,4 +1,5 @@
 pub mod acp;
+pub mod audio;
 pub mod code;
 pub mod commands;
 pub mod compress;
@@ -12,6 +13,7 @@ pub mod llm_router;
 pub mod mcp;
 pub mod memory;
 pub mod metrics;
+pub mod observability;
 // OmniFS (F1+F2): detecção do binário `omnifs-mcp`, cliente JSON-RPC pro daemon
 // (unix socket), daemon gerenciado + provisão da Pasta de Projetos e guard
 // pré-spawn (cwd em mount FUSE morto → erro claro em vez de agente ENOTCONN).
@@ -25,6 +27,7 @@ pub mod pty;
 // Reusa ACP + PTY + MCP. Estende orchestration_send existente com tools novas.
 pub mod orchestrator;
 pub mod redactor;
+pub mod sandbox;
 // Registro RPC central (ref #8) — substrato CLI/mobile: socket local + token por
 // sessão + 3 métodos (status / agents.list / pty.snapshot). Subido no setup() via
 // tauri::async_runtime::spawn; degrade limpo se o socket não bindar.
@@ -44,7 +47,7 @@ use commands::code::{
 use commands::dbnode::db_query;
 use commands::debug::debug_request;
 use commands::debug_log::{debug_log_mark, debug_log_path, debug_log_write};
-use commands::diagnostics::collect_diagnostics;
+use commands::diagnostics::{collect_diagnostics, diagnostics_export};
 use commands::metrics::metrics_snapshot;
 use commands::compress::{compressor_list, compressor_savings};
 use commands::editor::{detect_editors, open_in_editor};
@@ -71,6 +74,10 @@ use commands::review_cfg::{
     review_suppress_write,
 };
 use commands::review_history::{review_history_add, review_history_list};
+use commands::debug_mode::{debug_mode_get, debug_mode_set};
+use commands::observability::{
+    observability_count, observability_record, observability_record_batch, observability_timeline,
+};
 use commands::role_import::{role_import_file, role_template, role_template_save};
 use commands::routines::{
     routines_delete, routines_list, routines_record_run, routines_runs, routines_upsert,
@@ -90,8 +97,8 @@ use commands::mcp::{
     mcp_server_url, mcp_unregister_agent, save_paste_image, set_max_agents,
 };
 use commands::memory::{
-    memory_active, memory_connect, memory_migrate, memory_migrate_preview, memory_providers_list,
-    memory_set_active, memory_test,
+    memory_active, memory_connect, memory_dream, memory_migrate, memory_migrate_preview,
+    memory_providers_list, memory_set_active, memory_test,
 };
 use commands::omnifs::{
     omnifs_is_managed_cwd, omnifs_log, omnifs_provision, omnifs_recover, omnifs_reindex,
@@ -99,7 +106,7 @@ use commands::omnifs::{
 };
 use commands::hosts::{hosts_add, hosts_list, hosts_remove};
 use commands::pty::{
-    pty_kill, pty_list, pty_pipe_create, pty_pipe_list, pty_pipe_remove, pty_proc_info,
+    pty_kill, pty_list, pty_list_alive, pty_pipe_create, pty_pipe_list, pty_pipe_remove, pty_proc_info,
     pty_proc_info_all,
     pty_read_screen, pty_resize, pty_snapshot, pty_spawn, pty_write,
 };
@@ -366,7 +373,20 @@ pub fn run() {
             targets.push(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout));
             tauri_plugin_log::Builder::new()
                 .targets(targets)
-                .level(log::LevelFilter::Info)
+                // Nível vem do MODO DEBUG (marcador ~/.omnirift/debug-mode), lido aqui
+                // no boot: Debug quando ligado, Info caso contrário. O beta tester liga
+                // em Configurações, reproduz o problema e manda o diagnóstico.
+                .level(commands::debug_mode::level_filter())
+                // [segurança] Redige segredos na ESCRITA (não só na leitura do /diag): sem
+                // isto, qualquer log::info!/error! que interpole output de comando, header ou
+                // linha de env grava `sk-…`/`ghp_…`/PEM em CLARO no omnirift.log (que outro
+                // processo com acesso ao FS do usuário pode ler). Reproduz o formato default
+                // do plugin (`[data][hora][target][LEVEL] msg`, UTC) e redige só a mensagem.
+                .format(|out, message, record| {
+                    let ts = chrono::Utc::now().format("[%Y-%m-%d][%H:%M:%S]");
+                    let msg = crate::redactor::redact(&message.to_string());
+                    out.finish(format_args!("{}[{}][{}] {}", ts, record.target(), record.level(), msg));
+                })
                 // Rotação razoável: mantém só o log atual até ~5 MB, depois rotaciona.
                 .max_file_size(5 * 1024 * 1024)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
@@ -379,6 +399,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
+            crate::audio::play_boot_sound,
+            crate::audio::play_greeting,
             acp_spawn,
             acp_attach,
             acp_prompt,
@@ -416,6 +438,7 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_list,
+            pty_list_alive,
             pty_pipe_create,
             pty_pipe_remove,
             pty_pipe_list,
@@ -539,6 +562,13 @@ pub fn run() {
             review_pathrules_write,
             review_history_add,
             review_history_list,
+            debug_mode_get,
+            debug_mode_set,
+            diagnostics_export,
+            observability_record,
+            observability_record_batch,
+            observability_timeline,
+            observability_count,
             code_open,
             code_save,
             code_watch,
@@ -594,6 +624,7 @@ pub fn run() {
             memory_test,
             memory_set_active,
             memory_active,
+            memory_dream,
             memory_migrate_preview,
             memory_migrate,
             omnifs_status,

@@ -27,6 +27,15 @@ import {
 import { kanbanCardCreate } from "@/lib/kanban-client";
 import { omnifsIsManagedCwd, omnifsSnapshotNow } from "@/lib/omnifs-client";
 import { PIPELINE_TEMPLATES } from "@/lib/pipeline-templates";
+// Aliasados: `addAgent` já existe neste componente como ação do canvas store (cria nó no
+// canvas). Sem o alias, o import sequestrava as chamadas do Montar — o tsc pegou.
+import {
+  updateAgent as planUpdateAgent,
+  removeAgent as planRemoveAgent,
+  addAgent as planAddAgent,
+  removeSubagent as planRemoveSubagent,
+} from "@/lib/pipeline-edit";
+import { fitActiveFloor } from "@/lib/canvas-focus";
 import { useT } from "@/lib/i18n";
 
 const MODEL_COLORS: Record<string, string> = {
@@ -42,6 +51,19 @@ const CLI_DEFAULT = `${CLI_PREFIX}claude`;
 
 // Preferência do toggle "ancorar na arquitetura real (OmniGraph)" — persistida entre sessões.
 const ANCHOR_KEY = "omnirift-pipe-anchor-arch";
+/** Como montar o time. Default `terminal` (claude nativo): o modo ACP bloqueia as tools
+ * de execução por design, então serve pra líder que coordena — não pro time inteiro.
+ * Quem não sabe disso monta em ACP e vê agentes que não executam nada. Pedido de beta
+ * tester (Eric, 18/07): "esqueço sempre que o modo ACP não é ideal pra todo o time". */
+const MOUNT_AS_KEY = "omnirift-pipe-mount-as";
+type MountAs = "agent" | "terminal" | "hybrid";
+function loadMountAs(): MountAs {
+  try {
+    const v = localStorage.getItem(MOUNT_AS_KEY);
+    if (v === "agent" || v === "terminal" || v === "hybrid") return v;
+  } catch { /* localStorage off */ }
+  return "terminal";
+}
 
 export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
   const t = useT();
@@ -67,7 +89,10 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
   const builtLabels = useMemo(() => builtLabelsKey.split("\u0000").filter(Boolean), [builtLabelsKey]);
 
   const [providers, setProviders] = useState<LlmProvider[]>([]);
-  const [mountAs, setMountAs] = useState<"agent" | "terminal">("agent");
+  // Híbrido (default): líder = OmniAgent ACP (orquestrador — nasce com tools de execução
+  // bloqueadas por design, só delega); executores = terminais claude com role nativo.
+  // Time 100% ACP era o default antigo e produzia N coordenadores sem NINGUÉM que executa.
+  const [mountAs, setMountAs] = useState<MountAs>(loadMountAs);
   const [providerId, setProviderId] = useState("");
   const [model, setModel] = useState("");
   const [desc, setDesc] = useState("");
@@ -199,7 +224,7 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
       plan.connections.filter((c) => c.from.toLowerCase() === role.toLowerCase()).map((c) => c.to);
 
     // Terminal-com-role: o perfil MCP de dev é um só (resolve 1x); settings é por-agente.
-    const mcpPath = mountAs === "terminal" ? await agentMcpConfig().catch(() => null) : null;
+    const mcpPath = mountAs !== "agent" ? await agentMcpConfig().catch(() => null) : null;
 
     const idByRole = new Map<string, string>();
     const floorByRole = new Map<string, string | undefined>();
@@ -261,7 +286,7 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
           : `Prepare sua fatia agora lendo ${repoHint}; execute quando ${ups.join(", ")} te entregar o trabalho.`);
 
       let nodeId: string;
-      if (mountAs === "terminal") {
+      if (mountAs === "terminal" || (mountAs === "hybrid" && !isLeader)) {
         // Terminal claude NATIVO: persona vira system prompt real (--append-system-prompt,
         // dentro do contrato dev) + modelo do plano via --model (o CLI aceita haiku/sonnet/opus).
         const settingsPath = await agentSettingsConfig(a.role).catch(() => null);
@@ -358,6 +383,9 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
       `[pipeline] Montar: ${idByRole.size} agentes (${mountAs}), ${createdFloors} paralelo(s) criado(s), ` +
       `${skippedCross} conexão(ões) cross-floor pulada(s), ${skippedByLimit} agente(s) barrado(s) por licença`,
     );
+    // Enquadra o time recém-montado: sem isto, agente fora do viewport ficava invisível
+    // (e, antes do gate spawnedOnce no FloorCanvas, nem chegava a spawnar).
+    fitActiveFloor();
     onClose();
   }
 
@@ -514,26 +542,93 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
                 </div>
               )}
 
-              {/* Agentes por onda (colunas = mini-canvas) */}
+              {/* O plano passou a ser editável: role pode mudar, então o índice real do agente (não o role) é a chave dos cards. */}
               <div className="flex gap-3 overflow-x-auto pb-1">
                 {waves.map((w) => (
-                  <div key={w} className="min-w-[180px] flex-1 space-y-1.5">
-                    <div className="text-[10px] uppercase tracking-wider text-textMuted">{t("pipe.wave", "onda")} {w}</div>
-                    {plan.agents.filter((a) => (a.wave ?? 1) === w).map((a) => (
-                      <div key={a.role} className="rounded-md border border-brand/30 bg-brand/5 p-2">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[12px] font-semibold text-text">{a.role}</span>
-                          {a.model && <span className={`rounded px-1 py-0.5 text-[8px] uppercase ${MODEL_COLORS[a.model] ?? "bg-white/10 text-text/60"}`}>{a.model}</span>}
-                          {a.floor && plan.floors.length > 1 && <span className="text-[8px] text-textMuted">▦ {a.floor}</span>}
-                        </div>
-                        <div className="text-[10px] leading-snug text-text/60">{a.why}</div>
-                        {plan.subagents.filter((s) => s.parent.toLowerCase() === a.role.toLowerCase()).map((s) => (
-                          <div key={s.role} className="mt-1 rounded border border-amber-500/25 bg-amber-500/5 px-1.5 py-0.5 text-[10px] text-amber-200/90">
-                            ↳ {s.role}{s.model ? ` · ${s.model}` : ""} <span className="text-text/40">(sub)</span>
+                  <div key={w} className="min-w-[210px] flex-1 space-y-1.5">
+                    <div className="text-[10px] uppercase tracking-wider text-textMuted">
+                      {t("pipe.wave", "onda")} {w}
+                    </div>
+
+                    {plan.agents
+                      .map((a, i) => ({ a, i }))
+                      .filter(({ a }) => (a.wave ?? 1) === w)
+                      .map(({ a, i }) => (
+                        <div key={i} className="rounded-md border border-brand/30 bg-brand/5 p-2 space-y-1.5">
+                          <div className="flex items-start gap-1">
+                            <input
+                              type="text"
+                              value={a.role}
+                              onChange={(e) => setPlan(planUpdateAgent(plan, i, { role: e.target.value }))}
+                              className="flex-1 rounded border border-border/60 bg-bg/40 px-1 py-0.5 text-[11px] outline-none focus:border-brand"
+                            />
+                            <select
+                              value={a.model ?? ""}
+                              onChange={(e) => setPlan(planUpdateAgent(plan, i, { model: e.target.value || undefined }))}
+                              className={`rounded border border-border/60 px-1 py-0.5 text-[10px] outline-none focus:border-brand ${MODEL_COLORS[a.model ?? ""] ?? "bg-white/10 text-text/60"}`}
+                            >
+                              <option value="">— modelo —</option>
+                              <option value="haiku">haiku</option>
+                              <option value="sonnet">sonnet</option>
+                              <option value="opus">opus</option>
+                            </select>
+                            <button
+                              type="button"
+                              title={t("pipe.rmAgent", "remover este agente do plano (tira também os subagentes e conexões dele)")}
+                              onClick={() => setPlan(planRemoveAgent(plan, i))}
+                              className="mt-0.5 text-textMuted hover:text-danger"
+                            >
+                              <X size={11} />
+                            </button>
                           </div>
-                        ))}
-                      </div>
-                    ))}
+
+                          {plan.floors.length > 1 && (
+                            <select
+                              value={a.floor ?? ""}
+                              onChange={(e) => setPlan(planUpdateAgent(plan, i, { floor: e.target.value || undefined }))}
+                              className="w-full rounded border border-border/60 bg-bg/40 px-1 py-0.5 text-[10px] outline-none focus:border-brand"
+                            >
+                              <option value="">— sem paralelo —</option>
+                              {plan.floors.map((f) => (
+                                <option key={f.name} value={f.name}>
+                                  {f.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+
+                          <textarea
+                            rows={2}
+                            value={a.why}
+                            placeholder={t("pipe.whyPh", "o que este agente faz")}
+                            onChange={(e) => setPlan(planUpdateAgent(plan, i, { why: e.target.value }))}
+                            className="w-full resize-none rounded border border-border/60 bg-bg/40 px-1 py-0.5 text-[11px] outline-none focus:border-brand"
+                          />
+
+                          {plan.subagents
+                            .filter((s) => s.parent?.toLowerCase() === a.role.toLowerCase())
+                            .map((s) => (
+                              <div key={s.role} className="flex items-center justify-between rounded border border-amber-500/25 bg-amber-500/5 px-1.5 py-0.5 text-[10px] text-amber-200/90">
+                                <span>↳ {s.role}{s.model ? ` (${s.model})` : ""} (sub)</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setPlan(planRemoveSubagent(plan, a.role, s.role))}
+                                  className="text-textMuted hover:text-danger"
+                                >
+                                  <X size={11} />
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                      ))}
+
+                    <button
+                      type="button"
+                      onClick={() => setPlan(planAddAgent(plan, w))}
+                      className="w-full rounded border border-dashed border-border/50 px-1 py-1 text-[10px] text-textMuted hover:text-brand"
+                    >
+                      + agente
+                    </button>
                   </div>
                 ))}
               </div>
@@ -571,12 +666,18 @@ export function PipelineArchitectModal({ onClose }: { onClose: () => void }) {
           <footer className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
             <select
               value={mountAs}
-              onChange={(e) => setMountAs(e.target.value as "agent" | "terminal")}
-              title={t("pipe.mountAsT", "OmniAgent = nó ACP (persona por priming). Terminal = claude nativo com role via --append-system-prompt + --model do plano.")}
+              onChange={(e) => {
+                const v = e.target.value as MountAs;
+                setMountAs(v);
+                // Lembra a escolha: quem troca de propósito não deve reconfigurar toda vez.
+                try { localStorage.setItem(MOUNT_AS_KEY, v); } catch { /* localStorage off */ }
+              }}
+              title={t("pipe.mountAsT", "Terminal (padrão) = claude nativo com role via --append-system-prompt + --model do plano; executa de verdade. Híbrido = líder OmniAgent (ACP, orquestra) + executores terminal claude. OmniAgent = nó ACP: só coordena — as tools de execução são bloqueadas por design, então NÃO use pro time inteiro.")}
               className={`${sel} text-[11px]`}
             >
-              <option value="agent">{t("pipe.asAgent", "montar como OmniAgent (ACP)")}</option>
-              <option value="terminal">{t("pipe.asTerminal", "montar como terminal claude (role nativo)")}</option>
+              <option value="terminal">{t("pipe.asTerminal", "montar como terminal claude (role nativo) — padrão")}</option>
+              <option value="hybrid">{t("pipe.asHybrid", "montar híbrido (líder ACP + executores terminal)")}</option>
+              <option value="agent">{t("pipe.asAgent", "montar como OmniAgent (ACP) — só coordena, não executa")}</option>
             </select>
             <button onClick={() => void save()} className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-text hover:bg-surface2">
               <Save size={13} /> {t("pipe.saveBtn", "Salvar plano")}

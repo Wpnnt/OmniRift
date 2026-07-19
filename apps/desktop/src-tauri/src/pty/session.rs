@@ -10,6 +10,14 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
 
+#[cfg(windows)]
+/// Separador de entradas da variável de ambiente PATH do sistema operacional. Atenção: usar ':' no Windows não gera erro visível; o Windows quebra a string por ';', então a primeira entrada vira um caminho concatenado inexistente, matando silenciosamente tanto o diretório de ferramentas do app quanto o system32.
+pub(crate) const PATH_SEP: &str = ";";
+
+#[cfg(not(windows))]
+/// Separador de entradas da variável de ambiente PATH do sistema operacional. Atenção: usar ':' no Windows não gera erro visível; o Windows quebra a string por ';', então a primeira entrada vira um caminho concatenado inexistente, matando silenciosamente tanto o diretório de ferramentas do app quanto o system32.
+pub(crate) const PATH_SEP: &str = ":";
+
 pub type SessionId = String;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -155,6 +163,10 @@ pub struct PtySession {
     /// zumbi: o master não fechava (o StateDetector segura um clone), logo sem SIGHUP,
     /// e read_loop/emit/waiter/feeder vazavam por sessão a cada terminal fechado.
     killer: Mutex<Box<dyn ChildKiller + Send>>,
+    /// sinal autoritativo de que o processo filho terminou, marcado pela thread waiter no
+    /// instante do child.wait(). Cross-platform de propósito: o /proc/<pid> usado antes não existe
+    /// no Windows, então lá o alive mentia sempre.
+    exited: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PtySession {
@@ -171,6 +183,13 @@ impl PtySession {
 
         let cmd = build_command(&cfg);
 
+        // O QUE foi spawnado, no log. Sem isto o diagnóstico que o beta tester manda pro
+        // suporte não distingue "o binário não existe" de "o TUI não desenha" — que foi
+        // exatamente a dúvida no caso dos nós em branco no Windows. Os args ficam só no
+        // nível debug porque carregam persona/prompt inteiros (e passam pelo redactor).
+        log::info!("PTY {id} spawn: {} ({} args) cwd={:?}", cfg.command, cfg.args.len(), cfg.cwd);
+        log::debug!("PTY {id} args: {:?}", cfg.args);
+        let spawned_at = Instant::now();
         let mut child = pair.slave.spawn_command(cmd).context("falha ao spawnar processo no PTY")?;
         let root_pid = child.process_id();
         // Clona o killer ANTES do `child` ir pra thread waiter (move, mais abaixo) — é
@@ -265,35 +284,89 @@ impl PtySession {
 
         let id_for_waiter = id.clone();
         let app_for_waiter = app.clone();
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited_for_waiter = Arc::clone(&exited);
+
         std::thread::spawn(move || {
             let status = child.wait();
-            // Sessão morreu → tira do registry MCP. Senão o label fantasma continua
-            // registrado apontando pra sessão morta e o resolve fuzzy ainda o acha
-            // ("dormindo (dead)"). Por session_id: se o label já foi re-registrado
-            // com sessão nova (reload/switchCli), a entry nova NÃO é tocada.
+            // Código de saída + QUANTO viveu. Um processo que morre em milissegundos é
+            // binário ausente / erro de spawn; um que viveu minutos saiu normal. É a
+            // pergunta que o log tinha que responder e não respondia.
+            match &status {
+                Ok(st) => log::info!(
+                    "PTY {id_for_waiter} saiu: código {} após {:?}",
+                    st.exit_code(),
+                    spawned_at.elapsed()
+                ),
+                Err(e) => log::warn!("PTY {id_for_waiter} wait falhou após {:?}: {e}", spawned_at.elapsed()),
+            }
+            // marcar antes de emitir/limpar elimina a janela em que o processo já morreu
+            // mas a UI ainda o vê vivo.
+            exited_for_waiter.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            let mut agent_name = String::new();
             {
                 use tauri::Manager;
                 if let Some(reg) = app_for_waiter.try_state::<Arc<crate::mcp::AgentRegistry>>() {
                     for label in reg.unregister_by_session(&id_for_waiter) {
-                        log::info!("MCP: agente '{label}' desregistrado (sessão morreu)");
+                        log::info!("MCP: agente removido (sessão morreu): {label}");
+                        if agent_name.is_empty() {
+                            agent_name = label;
+                        }
                     }
                 }
             }
+
+            // O detector só vira Dead quando o broadcast fecha com RecvError::Closed, mas o
+            // sender fica retido pela própria PtySession e nunca fecha; sem este push o card
+            // ficava VERDE com o processo morto, e um CLI que falha em 200ms por binário
+            // inexistente no Windows não gerava evento de estado nenhum.
+            {
+                use tauri::{Emitter, Manager};
+                if let Some(pm) = app_for_waiter.try_state::<Arc<crate::pty::PtyManager>>() {
+                    pm.set_agent_state(&id_for_waiter, crate::pty::AgentState::Dead);
+                }
+                let _ = app_for_waiter.emit("agent://status", crate::pty::AgentStatusEvent {
+                    session_id: id_for_waiter.clone(),
+                    state: crate::pty::AgentState::Dead,
+                    agent: agent_name,
+                    message: None,
+                });
+            }
+
             match status {
                 Ok(status) => {
-                    let _ = app_for_waiter.emit(
-                        "pty://exit",
-                        PtyExitEvent { session_id: id_for_waiter, exit_code: Some(status.exit_code() as i32) },
-                    );
+                    let _ = app_for_waiter.emit("pty://exit", PtyExitEvent {
+                        session_id: id_for_waiter,
+                        exit_code: Some(status.exit_code() as i32),
+                    });
                 }
                 Err(e) => {
                     log::error!("erro aguardando child do PTY: {e}");
-                    let _ = app_for_waiter.emit("pty://exit", PtyExitEvent { session_id: id_for_waiter, exit_code: None });
+                    let _ = app_for_waiter.emit("pty://exit", PtyExitEvent {
+                        session_id: id_for_waiter,
+                        exit_code: None,
+                    });
                 }
             }
         });
 
-        Ok(Self { id, master, writer, output_tx, root_pid, parser, seq, killer: Mutex::new(killer) })
+        Ok(Self {
+            id,
+            master,
+            writer,
+            output_tx,
+            root_pid,
+            parser,
+            seq,
+            killer: Mutex::new(killer),
+            exited,
+        })
+    }
+
+    /// true enquanto o processo filho está vivo; não consulta o SO, lê a flag do waiter.
+    pub fn is_alive(&self) -> bool {
+        !self.exited.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Mata o processo filho do PTY. Fechar o filho fecha o slave → o `read_loop` sai
@@ -457,6 +530,12 @@ fn build_command(cfg: &PtySpawnConfig) -> CommandBuilder {
         }
     };
 
+    // [sandbox] Linux: envelopa o comando com bwrap quando OMNIRIFT_SANDBOX=workspace e bwrap
+    // está no PATH (fail-open: off/remoto/sem-bwrap → comando cru, zero regressão). Contém o
+    // EXECUTOR real (workers PTY), não o processo Tauri — o ponto onde bash/edit/rm rodam.
+    #[cfg(target_os = "linux")]
+    let (program, args) = crate::sandbox::maybe_wrap(program, args, cfg.cwd.as_deref(), host.is_remote());
+
     let mut cmd = build_program(&program, &args);
 
     // O `cwd` LOCAL só se aplica ao processo local. Em SSH, o cwd já foi embutido no
@@ -494,7 +573,13 @@ fn build_command(cfg: &PtySpawnConfig) -> CommandBuilder {
             parts.push(process_path);
         }
         if !parts.is_empty() {
-            cmd.env("PATH", parts.join(":"));
+            // Separador de PATH é do SO: `:` no Unix, `;` no Windows. Usar `:` no
+            // Windows não dá erro — dá algo PIOR: o Windows quebra a string por `;`,
+            // então a 1ª entrada vira `C:\Users\x\.omnirift\tools\bin:C:\Windows\system32`,
+            // um caminho inexistente. Isso mata de uma vez o tools/bin do OmniRift E o
+            // system32, em silêncio (os CLIs em %APPDATA%\npm sobrevivem, o que faz o
+            // bug parecer "só alguns CLIs não abrem").
+            cmd.env("PATH", parts.join(PATH_SEP));
         }
     }
     for (k, v) in &cfg.env {
