@@ -25,6 +25,15 @@ const FP_HOOK_SESSIONSTART: &str =
     include_str!("../../../../../tools/failproof/hooks/sessionstart_known_failures.py");
 const FP_HOOK_USERPROMPT: &str =
     include_str!("../../../../../tools/failproof/hooks/userprompt_correction_detector.py");
+/// Registra a sessão pro watchdog vigiar. O hook se auto-gateia em `is_unattended()`:
+/// numa sessão que o usuário está olhando ele NÃO registra nada — vigiar (e no strike 3
+/// matar) um agente que a pessoa acompanha seria pior que o problema.
+const FP_HOOK_WATCH_REGISTER: &str =
+    include_str!("../../../../../tools/failproof/hooks/watch_register.py");
+/// Desregistra ao encerrar. Sem isto o `watch/` acumula sessões mortas e o watchdog
+/// gera postmortem de conversa que já acabou.
+const FP_HOOK_WATCH_CLEANUP: &str =
+    include_str!("../../../../../tools/failproof/hooks/watch_cleanup.py");
 const FP_HOOK_POSTTOOL: &str =
     include_str!("../../../../../tools/failproof/hooks/posttool_failure_capture.py");
 
@@ -80,6 +89,8 @@ pub fn ensure_failproof_scripts(app: &tauri::AppHandle) -> Result<PathBuf, Strin
         ("sessionstart_known_failures.py", FP_HOOK_SESSIONSTART),
         ("userprompt_correction_detector.py", FP_HOOK_USERPROMPT),
         ("posttool_failure_capture.py", FP_HOOK_POSTTOOL),
+        ("watch_register.py", FP_HOOK_WATCH_REGISTER),
+        ("watch_cleanup.py", FP_HOOK_WATCH_CLEANUP),
     ] {
         std::fs::write(hooks.join(name), body).map_err(|e| format!("gravar {name}: {e}"))?;
     }
@@ -101,12 +112,40 @@ fn sanitize_label(label: &str) -> String {
     if s.is_empty() { "agent".into() } else { s }
 }
 
-/// Comando curl de um push-hook de status (loopback, `-m 2` = nunca trava o agente).
-/// `state` em query param → ZERO inferno de quoting cross-platform (curl existe no
-/// Win10+/Linux/Mac). O label vai no path da rota `/agent-hook/:label`.
-fn status_hook_cmd(label: &str, state: &str) -> String {
+/// Escreve a configuração do curl em arquivo próprio e devolve seu caminho.
+/// O token de autenticação vai para esse arquivo, e não para a query string ou
+/// argv, porque a linha de comando de um processo é legível por qualquer
+/// processo local via `ps` ou `/proc/<pid>/cmdline`. Se o token viajasse na
+/// URL, qualquer usuário na mesma máquina conseguiria lê-lo, o que quebra
+/// exatamente o modelo de ameaça que justifica exigir autenticação nessa
+/// rota. Colocar o header no arquivo de configuração do curl e carregá-lo
+/// com `-K` isola o segredo de outros processos.
+fn write_hook_curl_config(dir: &std::path::Path, label: &str, token: &str) -> Option<std::path::PathBuf> {
+    let path = dir.join(format!("agent-hook-{}.curl", label));
+    let contents = format!("header = \"x-omnirift-token: {token}\"\n");
+    std::fs::write(&path, contents).ok()?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(windows)]
+    {
+        // No Windows não há equivalente simples de 0600; o arquivo herda a ACL
+        // do diretório de dados do app (perfil do usuário).
+    }
+
+    Some(path)
+}
+
+// `curl -K` lê o header de autenticação do arquivo de configuração 0600, de
+// forma que o token nunca aparece na linha de comando nem vaza via argv.
+fn status_hook_cmd(label: &str, state: &str, curl_cfg: &std::path::Path) -> String {
     format!(
-        "curl -s -m 2 -X POST \"http://127.0.0.1:{}/agent-hook/{}?state={}\"",
+        "curl -s -m 2 -K \"{}\" -X POST \"http://127.0.0.1:{}/agent-hook/{}?state={}\"",
+        curl_cfg.display(),
         crate::mcp::MCP_PORT,
         label,
         state,
@@ -127,6 +166,18 @@ pub fn agent_settings_config(
     label: String,
     failproof: Option<bool>,
 ) -> Option<String> {
+    // Token de auth do control plane, o MESMO do /sse. O /agent-hook era a única rota
+    // sem auth — loopback, mas qualquer processo local podia forjar o estado de um agente
+    // (marcar "done" e destravar um gate). Se o token não estiver no estado (app subindo),
+    // o hook nasce SEM token e o servidor recusa: falha fechada, não aberta.
+    let hook_token = {
+        use tauri::Manager;
+        app.try_state::<std::sync::Arc<crate::mcp::server::McpAuthToken>>()
+            .map(|t| t.0.clone())
+            .unwrap_or_default()
+    };
+    let hook_dir = { use tauri::Manager; app.path().app_data_dir().ok()? };
+    let hook_cfg = write_hook_curl_config(&hook_dir, sanitize_label(&label).as_str(), &hook_token)?;
     let script = ensure_review_script(&app).ok()?;
     let cfg = config_path(&app).ok()?;
     // command roda via shell (sem `args`) → cita os caminhos por segurança.
@@ -145,19 +196,25 @@ pub fn agent_settings_config(
         // texto E voz. Requer login com conta Claude.ai (STT nos servidores Anthropic).
         "voice": { "enabled": true, "mode": "tap" },
         "language": "pt",
+        // Agente do canvas NÃO tem humano digitando turno a turno: quem manda tarefa é o
+        // orquestrador ou uma automação. É essa a definição de "unattended" que os hooks
+        // do failproof usam pra decidir se registram a sessão pro watchdog vigiar.
+        // Seguro porque a vigilância é por TURNO (register no UserPromptSubmit, cleanup no
+        // Stop): agente ocioso entre tarefas não está registrado e não pode ser morto.
+        "env": { "OMNI_UNATTENDED": "1" },
         "hooks": {
             // Prompt submetido → o agente começou a trabalhar.
             "UserPromptSubmit": [ { "hooks": [
-                { "type": "command", "command": status_hook_cmd(label, "working"), "timeout": 5 }
+                { "type": "command", "command": status_hook_cmd(label, "working", &hook_cfg), "timeout": 5 }
             ] } ],
             // Notification (pedido de permissão / espera de input) → bloqueado.
             "Notification": [ { "hooks": [
-                { "type": "command", "command": status_hook_cmd(label, "blocked"), "timeout": 5 }
+                { "type": "command", "command": status_hook_cmd(label, "blocked", &hook_cfg), "timeout": 5 }
             ] } ],
             // Stop: MERGE — status `done` (push) + review headless (gate NO-GO).
             // Ambos no mesmo array; o de review mantém timeout 180s (teto do LLM).
             "Stop": [ { "hooks": [
-                { "type": "command", "command": status_hook_cmd(label, "done"), "timeout": 5 },
+                { "type": "command", "command": status_hook_cmd(label, "done", &hook_cfg), "timeout": 5 },
                 { "type": "command", "command": review_cmd, "timeout": 180 }
             ] } ]
         }
@@ -210,6 +267,15 @@ fn inject_failproof_hooks(settings: &mut serde_json::Value, hooks_dir: &std::pat
         arr.push(serde_json::json!(
             { "type": "command", "command": cmd("userprompt_correction_detector.py"), "timeout": 10 }
         ));
+        // A JANELA DE VIGILÂNCIA É O TURNO, não a sessão. Registrar no SessionStart e só
+        // limpar no SessionEnd deixaria o agente vigiado enquanto está OCIOSO — e "ocioso"
+        // é indistinguível de "travado" pro watchdog, que mede staleness pelo mtime do
+        // transcript. Um agente que terminou a tarefa e espera o próximo dispatch seria
+        // morto em 20 min. Registrando no início do turno e limpando no fim, só um turno
+        // que de fato pendura é pego.
+        arr.push(serde_json::json!(
+            { "type": "command", "command": cmd("watch_register.py"), "timeout": 10 }
+        ));
     }
     // SessionStart: injeta os erros já conhecidos do projeto no contexto. MERGE (não
     // sobrescreve): preserva os SessionStart do usuário global já mesclados antes (ex:
@@ -222,6 +288,22 @@ fn inject_failproof_hooks(settings: &mut serde_json::Value, hooks_dir: &std::pat
         None => { hooks.insert("SessionStart".into(), serde_json::json!([fp_group])); }
     }
     // PostToolUse (só Bash): captura par falha→fix e devolve fix conhecido.
+    // Stop fecha a janela do turno (par do watch_register no UserPromptSubmit). MERGE —
+    // o Stop já carrega o gate de review. SessionEnd também limpa, como rede: se a sessão
+    // morrer no meio de um turno o Stop não dispara e a entrada ficaria órfã no watch/.
+    if let Some(arr) = hooks
+        .get_mut("Stop")
+        .and_then(|v| v.get_mut(0))
+        .and_then(|v| v.get_mut("hooks"))
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.push(serde_json::json!(
+            { "type": "command", "command": cmd("watch_cleanup.py"), "timeout": 10 }
+        ));
+    }
+    hooks.insert("SessionEnd".into(), serde_json::json!([ { "hooks": [
+        { "type": "command", "command": cmd("watch_cleanup.py"), "timeout": 10 }
+    ] } ]));
     hooks.insert("PostToolUse".into(), serde_json::json!([ { "matcher": "Bash", "hooks": [
         { "type": "command", "command": cmd("posttool_failure_capture.py"), "timeout": 10 }
     ] } ]));
@@ -376,7 +458,7 @@ pub fn agent_config_dir() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::inject_failproof_hooks;
+    use super::{inject_failproof_hooks, status_hook_cmd, write_hook_curl_config};
     use std::path::Path;
 
     #[test]
@@ -398,9 +480,23 @@ mod tests {
         assert_eq!(h["PostToolUse"][0]["matcher"], "Bash");
         assert!(h["PostToolUse"][0]["hooks"][0]["command"]
             .as_str().unwrap().contains("posttool_failure_capture.py"));
+        // WATCH: o registro entra no SessionStart junto do known_failures, e a limpeza
+        // no Stop. Sem estes dois o watchdog roda a cada 5min sobre um `watch/` vazio —
+        // timer ativo vigiando nada, que é o mesmo teatro do gate que não escaneava.
+        let ss = h["SessionStart"][0]["hooks"].as_array().unwrap();
+        assert_eq!(ss.len(), 1, "SessionStart NÃO registra watch (a janela é o turno)");
+        // Janela = turno: register no UserPromptSubmit, cleanup no Stop. SessionEnd limpa
+        // como rede pra sessão que morre no meio do turno.
+        let stop = h["Stop"][0]["hooks"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "Stop = review + cleanup do watch");
+        assert!(stop[0]["command"].as_str().unwrap().contains("review"), "review não pode sumir");
+        assert!(stop[1]["command"].as_str().unwrap().contains("watch_cleanup.py"));
+        assert!(h["SessionEnd"][0]["hooks"][0]["command"]
+            .as_str().unwrap().contains("watch_cleanup.py"));
         // UserPromptSubmit MERGE: agora tem 2 hooks (status + captador de correção).
         let ups = h["UserPromptSubmit"][0]["hooks"].as_array().unwrap();
-        assert_eq!(ups.len(), 2);
+        assert_eq!(ups.len(), 3, "status + captador de correção + registro do watch");
+        assert!(ups[2]["command"].as_str().unwrap().contains("watch_register.py"));
         assert!(ups[1]["command"].as_str().unwrap().contains("userprompt_correction_detector.py"));
         // Stop de review preservado intacto.
         assert_eq!(h["Stop"][0]["hooks"][0]["command"], "review");
@@ -413,4 +509,52 @@ mod tests {
         inject_failproof_hooks(&mut s, Path::new("/x"));
         assert!(s["hooks"]["SessionStart"].is_null());
     }
+
+    /// o motivo de existir o arquivo de config. argv e legivel por qualquer processo
+    /// local (ps, /proc/<pid>/cmdline); token em query string vazaria pra qualquer um na
+    /// mesma maquina — que e o modelo de ameaca que motivou por auth nessa rota.
+    #[test]
+    fn token_nao_aparece_na_linha_de_comando() {
+        let dir = std::env::temp_dir().join(format!("omnirift-hookcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = write_hook_curl_config(&dir, "Backend", "s3cr3ttoken123").unwrap();
+        let cmd = status_hook_cmd("Backend", "working", &cfg);
+        assert!(!cmd.contains("s3cr3ttoken123"), "token vazou na linha de comando: {cmd}");
+        assert!(cmd.contains("-K"), "deveria ler o header do arquivo de config: {cmd}");
+        assert!(cmd.contains("/agent-hook/Backend?state=working"), "rota/estado errados: {cmd}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// o token so sai de argv se ele estiver DE FATO no arquivo; e o arquivo so protege
+    /// se nao for legivel por outros usuarios.
+    #[test]
+    fn arquivo_de_config_carrega_o_header_e_e_privado() {
+        let dir = std::env::temp_dir().join(format!("omnirift-hookcfg-{}-perm", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = write_hook_curl_config(&dir, "QA", "abc123").unwrap();
+        let conteudo = std::fs::read_to_string(&cfg).unwrap();
+        assert!(conteudo.contains("x-omnirift-token: abc123"), "header ausente: {conteudo}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let modo = std::fs::metadata(&cfg).unwrap().permissions().mode() & 0o777;
+            assert_eq!(modo, 0o600, "arquivo com o token precisa ser 0600, veio {modo:o}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// os tres hooks (working/blocked/done) tem que apontar pro MESMO arquivo de config
+    /// e diferir SO no estado — regressao de quando o token era interpolado em cada um.
+    #[test]
+    fn cada_estado_gera_seu_proprio_comando() {
+        let dir = std::env::temp_dir().join(format!("omnirift-hookcfg-{}-est", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = write_hook_curl_config(&dir, "Front", "tk").unwrap();
+        for st in ["working", "blocked", "done"] {
+            let c = status_hook_cmd("Front", st, &cfg);
+            assert!(c.contains(&format!("state={st}")), "estado {st} ausente: {c}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

@@ -9,18 +9,32 @@ pub fn mcp_register_agent(
     session_id: String,
     description: String,
     floor: Option<String>,
+    // Papel do agente (Frontend/Backend/QA…). O guard anti-duplicata casa por papel
+    // além do nome, então quem registra sem role fica fora dessa proteção — aceitável
+    // pra nós criados à mão, mas o caminho do orquestrador SEMPRE deve mandar.
     role: Option<String>,
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
     registry.register_with_role(label, session_id, description, floor, role);
 }
 
+/// Desregistra um agente. Prefira SEMPRE mandar o `session_id`: o label pode ter sido
+/// SUFIXADO no registro (quando outra sessão viva já ocupava o nome), e desregistrar pelo
+/// label original removeria a entrada do OUTRO agente. Sem session_id, cai no label (legado).
 #[tauri::command]
 pub fn mcp_unregister_agent(
     label: String,
+    session_id: Option<String>,
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
-    registry.unregister(&label);
+    match session_id {
+        Some(sid) if !sid.is_empty() => {
+            registry.unregister_by_session(&sid);
+        }
+        _ => {
+            registry.unregister(&label);
+        }
+    }
 }
 
 /// Renomeia o agente no registry MCP (e ACP, se for OmniAgent) pela sessão.

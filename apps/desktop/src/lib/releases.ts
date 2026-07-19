@@ -24,6 +24,92 @@ export interface ReleaseEntry {
 /** Histórico completo — 77 versões, da mais nova (0.1.89) para a mais antiga (0.1.0). */
 export const RELEASES: ReleaseEntry[] = [
   {
+    version: "0.1.138",
+    date: "2026-07-19",
+    title: "Tela de licença mais clara e correções de segurança",
+    highlights: [
+      "A tela de licença agora mostra uma confirmação clara com a data de validade e um botão \"Trocar chave de licença\", evitando que você cole uma licença em cima da outra sem perceber.",
+      "O ID da máquina só fica em destaque enquanto você ainda precisa dele para pedir uma chave; depois de ativado, a tela exibe apenas as informações que importam.",
+      "A verificação de segurança voltou a examinar o projeto inteiro em busca de senhas e chaves esquecidas no código, sem desistir silenciosamente por excesso de tempo.",
+      "O canal interno que os agentes usam para informar seu próprio estado agora exige autenticação, e a credencial deixou de aparecer na lista de processos do sistema.",
+      "Corrigimos uma situação em que o monitor de sessões travadas podia encerrar o processo errado."
+    ],
+    tag: "fix",
+  },
+  {
+    version: "0.1.137",
+    date: "2026-07-19",
+    title: "Correções no Windows e no terminal que ficava verde após morrer",
+    highlights: [
+      "Corrigido: quando o programa de um terminal morre na hora de abrir (por exemplo, um CLI que não está instalado), o card agora fica marcado como encerrado em vez de continuar verde como se estivesse trabalhando.",
+      "Corrigido: abrir um terminal cujo processo já tinha morrido deixava a tela em branco, sem nenhuma mensagem. Agora um processo novo é iniciado e você vê o erro real na tela, como 'o comando não é reconhecido'.",
+      "Corrigido no Windows: o indicador de processo ativo respondia sempre que estava parado, porque usava um caminho que só existe no Linux.",
+      "O log agora registra qual programa foi aberto em cada terminal, com que código ele saiu e quanto tempo durou. Com o Modo Debug ligado, isso vai para o arquivo de diagnóstico e permite ao suporte diferenciar um programa que não existe de um que abre e não desenha na tela.",
+      "A tela de licença mudou depois de ativar: o campo de colar a chave some e dá lugar a uma confirmação clara, com a data de validade e um botão \"Trocar chave de licença\" para quando você realmente quiser mudar. Ao ativar, aparece um aviso grande na tela — antes só um selo pequenininho no canto indicava que já estava tudo liberado, e dava para colar uma licença em cima da outra sem perceber (obrigado, Eric)",
+    ],
+    tag: "fix",
+  },
+  {
+    version: "0.1.136",
+    date: "2026-07-18",
+    title: "Edite o time antes de montar, terminal nativo como padrão, modo Debug e mais",
+    highlights: [
+      "No Arquiteto de Pipeline agora dá para editar o time antes de montar: mudar nome, modelo, paralelo e descrição de cada agente, remover quem sobrou e adicionar um novo em qualquer onda",
+      "Renomear um agente atualiza junto as conexões, os subagentes e o caminho crítico",
+      "O Arquiteto passa a montar em terminal nativo por padrão; a escolha fica salva para a próxima vez",
+      "Novo Modo Debug em Configurações › Geral: liga a coleta detalhada de log e gera um arquivo de diagnóstico em texto puro para anexar ao suporte",
+      "Corrigido: colar a chave de licença junto com o número da lista (ex: \"04 lic_abc123\") não dá mais \"licença inválida\" — a chave é extraída do texto colado",
+      "O orquestrador não consegue mais duplicar agente trocando o nome: se já existe alguém livre naquele papel, o sistema recusa, mostra quem está disponível e manda delegar",
+      "Corrigido no Windows: a lista de programas (PATH) era montada com o separador do Linux, o que apagava silenciosamente a pasta de ferramentas do OmniRift e a do sistema",
+      "Kimi Code entrou no catálogo de instalação de CLIs",
+    ],
+    tag: "feature",
+  },
+  {
+    version: "0.1.135",
+    date: "2026-07-18",
+    title: "Guard anti-duplicata no orquestrador",
+    highlights: [
+      "O orquestrador parou de abrir agentes repetidos: se já existe alguém com aquele nome e livre no canvas, o sistema recusa e manda delegar para ele",
+      "A recusa só acontece quando o agente homônimo está parado; se ele está trabalhando, o segundo é permitido, então trabalho paralelo de verdade continua liberado",
+    ],
+    tag: "fix",
+  },
+  {
+    version: "0.1.134",
+    date: "2026-07-18",
+    title: "Orçamento de tokens, compactação de conversas e observabilidade",
+    highlights: [
+      "O /goal agora aceita orçamento de tokens e para sozinho depois de N turnos sem progresso, em vez de queimar contexto à toa",
+      "Conversas longas passam a ser resumidas em segundo plano antes de encher, sem travar o que você está fazendo",
+      "Novo Inspetor de Execução: uma linha do tempo do que cada agente realmente fez",
+      "Chegou a configuração de shell no Windows, incluindo WSL",
+      "Corrigido: mandar dois pedidos ao mesmo agente ao mesmo tempo (pelo celular ou pelo canvas) não embaralha mais a conversa",
+    ],
+    tag: "feature",
+  },
+  {
+    version: "0.1.133",
+    date: "2026-07-16",
+    title: "Correções no canvas",
+    highlights: [
+      "Corrigido: pegar um nó pelas bordas voltou a funcionar",
+      "Corrigido: os floors não re-renderizam mais várias vezes ao trocar de aba",
+    ],
+    tag: "fix",
+  },
+  {
+    version: "0.1.132",
+    date: "2026-07-15",
+    title: "Rotinas, OmniSwitch e build macOS",
+    highlights: [
+      "Na tela de Rotinas, gatilhos por condição agora aparecem separados dos agendados",
+      "O OmniSwitch passou a usar o relógio real para liberar uma chave em espera",
+      "Corrigido o empacotamento do aplicativo no macOS",
+    ],
+    tag: "fix",
+  },
+  {
     version: "0.1.131",
     date: "2026-07-08",
     title: "Virar um agente em outro papel/modelo + fim do travamento do canvas",

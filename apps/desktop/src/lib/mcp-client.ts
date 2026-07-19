@@ -17,18 +17,14 @@ export async function mcpRegisterAgent(
   floor?: string,
   role?: string,
 ): Promise<void> {
-  await invoke("mcp_register_agent", {
-    label,
-    sessionId,
-    description,
-    floor: floor ?? null,
-    role: role ?? null,
-  });
+  await invoke("mcp_register_agent", { label, sessionId, description, floor: floor ?? null, role: role ?? null });
 }
 
 /** Remove um agente do registry (terminal fechado/renomeado). */
-export async function mcpUnregisterAgent(label: string): Promise<void> {
-  await invoke("mcp_unregister_agent", { label });
+export async function mcpUnregisterAgent(label: string, sessionId?: string): Promise<void> {
+  // Manda o sessionId: o label pode ter sido sufixado no registro (colisão com outra
+  // sessão viva) e remover pelo label original apagaria a entrada do OUTRO agente.
+  await invoke("mcp_unregister_agent", { label, sessionId: sessionId ?? null });
 }
 
 /** Renomeia o agente no registry MCP/ACP pela sessão (UI rename no canvas).
