@@ -42,9 +42,18 @@ impl AgentRegistry {
         floor: Option<String>,
         role: Option<String>,
     ) {
-        // Re-registro (autoRegister / toggle MCP / restore) costuma vir SEM role.
-        // Preserva o role já gravado pelo pty_spawn (opencode/claude-code/…) —
-        // senão o log fica "role=Some → role=None" e @role:X deixa de casar.
+        // Idempotência: se já existe com mesmo session_id, atualiza silenciosamente.
+        // Resolve duplo registro (frontend autoRegisterMcp + backend pty_spawn) sem logs duplicados.
+        if let Some(existing) = self.0.get(&label) {
+            if existing.session_id == session_id {
+                let role = role.or(existing.role.clone());
+                let floor = floor.or(existing.floor.clone());
+                self.0.insert(label, AgentEntry { session_id, description, floor, role });
+                return;
+            }
+        }
+        
+        // Registro novo: preserva role/floor existente se não passado + loga.
         let role = role.or_else(|| self.0.get(&label).and_then(|e| e.role.clone()));
         let floor = floor.or_else(|| self.0.get(&label).and_then(|e| e.floor.clone()));
         log::info!("MCP: agente '{}' registrado ({}, role={:?})", label, &session_id[..8.min(session_id.len())], role);
