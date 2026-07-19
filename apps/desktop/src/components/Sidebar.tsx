@@ -64,7 +64,7 @@ import { saveWorkspace, loadWorkspaceFromDisk } from "@/lib/workspace-client";
 import { folderCanvasSave, folderCanvasLoad } from "@/lib/folder-canvas-client";
 import { snapshotCreate } from "@/lib/snapshot-client";
 import { focusNode } from "@/lib/canvas-focus";
-import { mcpRegisterAgent, mcpUnregisterAgent, agentMcpConfig, agentSettingsConfig, setMaxAgents, mcpAddCommand } from "@/lib/mcp-client";
+import { mcpRegisterAgent, mcpUnregisterAgent, agentMcpConfig, agentSettingsConfig, setMaxAgents, mcpAddCommand, openCodeOrchestrationEnv } from "@/lib/mcp-client";
 import { parallelGitCreate, parallelGitLand } from "@/lib/git-client";
 import { specListFiles, specArchive, specUnarchive, isDeadSpec, pathsOverlap, type SpecFile } from "@/lib/spec-client";
 import { writeFile } from "@/lib/preview-client";
@@ -246,8 +246,8 @@ interface AgentPreset {
   custom?: boolean;
   /** true = cria um OmniAgent (AgentNode estruturado via ACP), não um TerminalNode/PTY. */
   acp?: boolean;
-  /** Provider ACP quando acp=true (claude | codex | hermes). */
-  provider?: "claude" | "codex" | "hermes";
+  /** Provider ACP quando acp=true (claude | codex | hermes | opencode). */
+  provider?: "claude" | "codex" | "hermes" | "opencode";
 }
 
 // Instaladores oficiais dos CLIs (rodados num terminal ao clicar "instalar").
@@ -319,6 +319,17 @@ const PRESETS: AgentPreset[] = [
     description: "OmniAgent via Hermes (open-source) — escolha provider + modelo no wizard (Ollama Cloud / OpenRouter / Local, BYOK). 1ª vez: uvx baixa o pacote (~30s)",
     acp: true,
     provider: "hermes",
+  },
+  {
+    id: "omniagent-opencode",
+    label: "OmniAgent · OpenCode",
+    command: "opencode", // placeholder; ACP ignora command/role e usa o provider
+    role: "opencode",
+    icon: Bot,
+    description: "OmniAgent via OpenCode ACP (`opencode acp`) — chat estruturado + tools no canvas; resume via session/load. Requer opencode no PATH",
+    installCmd: INSTALL.opencode,
+    acp: true,
+    provider: "opencode",
   },
   {
     id: "orquestrador",
@@ -1363,7 +1374,8 @@ export function Sidebar() {
   // --append-system-prompt (nível-sistema) + deny-list + MCP; os outros CLIs não
   // têm flag de system-prompt → a persona vai como 1ª mensagem após o CLI subir.
   /** Spawna o Orquestrador no CLI escolhido, com ORCHESTRATOR_CONTRACT (não o
-   *  DEV_CONTRACT do worker). Claude = flag nativa; sem flag = 1ª mensagem quando pronto. */
+   *  DEV_CONTRACT do worker). Claude = flag nativa; sem flag = 1ª mensagem quando pronto.
+   *  OpenCode: OPENCODE_CONFIG com omnirift-agents (tools terminal_*). */
   async function spawnOrchestrator(cliId: string) {
     const cli = ROLE_CLIS.find((c) => c.id === cliId) ?? ROLE_CLIS[0];
     if (cli.role === "claude-code") {
@@ -1386,8 +1398,15 @@ export function Sidebar() {
       return;
     }
     // CLI sem flag (codex/gemini/opencode/antigravity): persona como 1ª mensagem
-    // quando o terminal fica pronto (robusto a tempo de boot/seleção de modelo).
-    const node = addTerminal({ command: cli.command, role: cli.role, label: "Orquestrador", compressor: loadDefaultCompressor() });
+    // quando o terminal fica pronto. OpenCode leva MCP via OPENCODE_CONFIG.
+    const ocEnv = cli.role === "opencode" ? await openCodeOrchestrationEnv() : [];
+    const node = addTerminal({
+      command: cli.command,
+      role: cli.role,
+      label: "Orquestrador",
+      compressor: loadDefaultCompressor(),
+      env: ocEnv.length > 0 ? ocEnv : undefined,
+    });
     if (!node) return; // bloqueado pelo limite community de agentes
     const sid = node.session_id;
     let ready = false, done = false;
@@ -1409,9 +1428,9 @@ export function Sidebar() {
   // Auto-registra um terminal recém-criado via spawnRole como MCP agent no backend
   // (agent_registry) → o Orquestrador o vê no terminal_list sem precisar marcar checkbox.
   // Tolerante: se o registro falha (MCP server caiu), só loga — o agente funciona normal.
-  function autoRegisterMcp(sessionId: string, label: string, prompt: string) {
+  function autoRegisterMcp(sessionId: string, label: string, prompt: string, role?: string) {
     const description = prompt.slice(0, 120) || `Agente ${label} disponível para tarefas.`;
-    mcpRegisterAgent(label, sessionId, description, undefined).catch(console.warn);
+    mcpRegisterAgent(label, sessionId, description, undefined, role).catch(console.warn);
     setMcpAgents((prev) => {
       const next = new Set([...prev, sessionId]);
       // Briefing assíncrono pro Orquestrador saber que entrou agente novo.
@@ -1490,7 +1509,7 @@ export function Sidebar() {
       });
       if (!node) return;
       // Auto-registra como MCP agent → o Orquestrador vê o agente no terminal_list.
-      autoRegisterMcp(node.session_id, r.name, r.prompt);
+      autoRegisterMcp(node.session_id, r.name, r.prompt, cli.role);
       const startup = (r.startupCmd ?? "").trim();
       const persona = (indexText ? `${r.prompt}\n\n${indexText}` : r.prompt).trim();
       if (persona && /\bclaude\b/i.test(startup) && !r.selfSystemPrompt) {
@@ -1519,7 +1538,7 @@ export function Sidebar() {
       env: built.env,
     });
     if (!node) return;
-    autoRegisterMcp(node.session_id, r.name, r.prompt);
+    autoRegisterMcp(node.session_id, r.name, r.prompt, built.role);
     if (built.firstMessage) sendLine(node.session_id, built.firstMessage, 1800);
   }
 
@@ -1553,14 +1572,16 @@ export function Sidebar() {
     const pluginArgs = wiring?.kind === "pluginDir" ? ["--plugin-dir", wiring.dir] : [];
     const skillEnv: Array<[string, string]> = wiring?.kind === "codexHome" ? [["CODEX_HOME", wiring.home]] : [];
     const indexText = wiring?.kind === "indexPrompt" ? wiring.text : "";
+    const ocEnv = /\bopencode\b/i.test(preset.command) ? await openCodeOrchestrationEnv() : [];
+    const env = [...skillEnv, ...ocEnv];
     const node = addTerminal({
       command: preset.command,
       args: [...baseArgs, ...pluginArgs],
-      role: preset.role,
+      role: preset.role === "custom" && /\bopencode\b/i.test(preset.command) ? "opencode" : preset.role,
       label: preset.label,
       compressor: loadDefaultCompressor(),
       executionHost,
-      env: skillEnv.length > 0 ? skillEnv : undefined,
+      env: env.length > 0 ? env : undefined,
     });
     // CLI sem flag/env de skills (indexPrompt) → injeta as skills como 1ª mensagem.
     if (node && indexText.trim()) {
@@ -1581,6 +1602,10 @@ export function Sidebar() {
     if (preset.custom) { await spawnCustomCli(preset, customClis.find((c) => `custom:${c.id}` === preset.id)); return; }
     const executionHost = resolveExecutionHost();
     const args = await argsWithMcp(preset);
+    // OpenCode (botão "Novo agente" / preset, não só Roles): MCP de orquestração.
+    const ocEnv = preset.role === "opencode" || /\bopencode\b/i.test(preset.command)
+      ? await openCodeOrchestrationEnv()
+      : [];
     addTerminal({
       command: preset.command,
       args,
@@ -1588,6 +1613,7 @@ export function Sidebar() {
       label: preset.label,
       compressor: loadDefaultCompressor(),
       executionHost,
+      env: ocEnv.length > 0 ? ocEnv : undefined,
     });
   }
 

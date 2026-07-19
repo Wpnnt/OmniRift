@@ -1,7 +1,7 @@
 use crate::db::Db;
 use crate::mcp::{registry::to_tool_name, AgentRegistry};
 use crate::proc_ext::NoWindow;
-use tauri::State;
+use tauri::{Manager, State};
 
 #[tauri::command]
 pub fn mcp_register_agent(
@@ -9,9 +9,10 @@ pub fn mcp_register_agent(
     session_id: String,
     description: String,
     floor: Option<String>,
+    role: Option<String>,
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
-    registry.register(label, session_id, description, floor);
+    registry.register_with_role(label, session_id, description, floor, role);
 }
 
 #[tauri::command]
@@ -20,6 +21,24 @@ pub fn mcp_unregister_agent(
     registry: State<'_, std::sync::Arc<AgentRegistry>>,
 ) {
     registry.unregister(&label);
+}
+
+/// Renomeia o agente no registry MCP (e ACP, se for OmniAgent) pela sessão.
+/// Chamado quando o usuário renomeia o nó no canvas — sem isto o `terminal_list`
+/// e o fuzzy de `agent_ask` continuam com o nome antigo ("OpenCode") e o Orquestrador
+/// não acha.
+#[tauri::command]
+pub fn mcp_rename_agent_by_session(
+    session_id: String,
+    new_label: String,
+    registry: State<'_, std::sync::Arc<AgentRegistry>>,
+    app: tauri::AppHandle,
+) -> Option<String> {
+    let mcp_old = registry.rename_by_session(&session_id, &new_label);
+    let acp_old = app
+        .try_state::<std::sync::Arc<crate::acp::AcpManager>>()
+        .and_then(|m| m.rename_label_by_session(&session_id, &new_label));
+    mcp_old.or(acp_old)
 }
 
 #[tauri::command]
@@ -44,8 +63,33 @@ pub fn mcp_server_url(
 
 /// Monta a URL SSE (loopback) com o token de auth embutido. Fonte única usada pelo
 /// comando `mcp_server_url` e pelo `agent_mcp_config` (entrada `omnirift-agents`).
-fn mcp_sse_url(token: &str) -> String {
+pub fn mcp_sse_url(token: &str) -> String {
     format!("http://127.0.0.1:{}/sse?token={}", crate::mcp::MCP_PORT, token)
+}
+
+/// Escreve `agent-opencode-mcp.json` no `dir` e devolve o path. Usado pelo comando
+/// Tauri e pelo `agent.spawn` da CLI (injetar OPENCODE_CONFIG no PTY opencode).
+pub fn write_opencode_mcp_config(dir: &std::path::Path, token: &str) -> Option<String> {
+    let url = mcp_sse_url(token);
+    let cfg = serde_json::json!({
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            "omnirift-agents": {
+                "type": "local",
+                "command": ["npx", "-y", "mcp-remote", url],
+                "enabled": true
+            }
+        }
+    });
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join("agent-opencode-mcp.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&cfg).ok()?).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(path.to_string_lossy().to_string())
 }
 
 /// Salva uma imagem colada (Ctrl+V) em arquivo PNG temporário e devolve o caminho.
@@ -310,6 +354,24 @@ pub fn agent_mcp_config(
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     Some(path.to_string_lossy().to_string())
+}
+
+/// Config OpenCode (`opencode.json`) só com o MCP `omnirift-agents` — o orquestrador
+/// / worker opencode ganha `terminal_*` / `memory_*` / `claim_*` sem sujar o
+/// `~/.config/opencode/opencode.json` do usuário. Injetado via env `OPENCODE_CONFIG`
+/// no spawn (merge na precedence do opencode, entre global e project).
+///
+/// Usa bridge **local** `npx mcp-remote <sse>` (mesmo do ACP): o client MCP do
+/// opencode fala stdio; o server OmniRift é SSE clássico. Remote SSE direto falha
+/// em mismatch de transport (mesmo motivo do Hermes toolless).
+#[tauri::command]
+pub fn agent_opencode_mcp_config(
+    app: tauri::AppHandle,
+    mcp_token: State<'_, std::sync::Arc<crate::mcp::server::McpAuthToken>>,
+) -> Option<String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().ok()?;
+    write_opencode_mcp_config(&dir, &mcp_token.0)
 }
 
 /// Um MCP server que o [`agent_mcp_config`] injetaria, com estimativa de custo de

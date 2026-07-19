@@ -134,6 +134,7 @@ export const CLI_COMMAND_PRESETS: Record<string, CliCommandPreset[]> = {
   ],
   opencode: [
     { id: "default", label: "opencode", line: "" },
+    { id: "auto", label: "opencode --auto", line: "opencode --auto" },
     { id: "pure", label: "opencode --pure", line: "opencode --pure" },
     { id: "continue", label: "opencode --continue", line: "opencode --continue" },
     { id: "custom", label: "Custom…", line: "" },
@@ -206,8 +207,16 @@ export function buildCliSwitch(opts: {
   persona: string;
   mcpConfigPath?: string | null;
   settingsPath?: string | null;
-}): { command: string; args: string[]; role: AgentRole; firstMessage?: string } {
-  const { cli, persona, mcpConfigPath, settingsPath } = opts;
+  /** Path do agent-opencode-mcp.json — vira env OPENCODE_CONFIG no spawn. */
+  openCodeConfigPath?: string | null;
+}): {
+  command: string;
+  args: string[];
+  role: AgentRole;
+  firstMessage?: string;
+  env?: Array<[string, string]>;
+} {
+  const { cli, persona, mcpConfigPath, settingsPath, openCodeConfigPath } = opts;
   if (cli.role === "claude-code") {
     return {
       command: cli.command,
@@ -220,7 +229,12 @@ export function buildCliSwitch(opts: {
   }
   // CLI sem flag de system-prompt (codex/opencode/antigravity/shell): persona vai como
   // 1ª mensagem quando o terminal fica ready (mesma convenção do spawnRole).
-  return { command: cli.command, args: [], role: cli.role, firstMessage: persona };
+  // OpenCode: MCP omnirift-agents via OPENCODE_CONFIG (não --mcp-config).
+  const env: Array<[string, string]> | undefined =
+    cli.role === "opencode" && openCodeConfigPath
+      ? [["OPENCODE_CONFIG", openCodeConfigPath]]
+      : undefined;
+  return { command: cli.command, args: [], role: cli.role, firstMessage: persona, env };
 }
 
 export const BUILTIN_ROLES: AgentRoleDef[] = [
@@ -229,7 +243,8 @@ export const BUILTIN_ROLES: AgentRoleDef[] = [
     name: "Orquestrador",
     builtin: true,
     master: true,
-    cli: "claude", // recomendado (MCP nativo p/ orquestrar); editável pra outro CLI/LLM
+    // Default claude (MCP nativo); opencode também orquestra via OPENCODE_CONFIG no spawn.
+    cli: "claude",
     prompt: ORCHESTRATOR_CONTRACT,
   },
   {
@@ -334,6 +349,26 @@ export function loadRoles(): AgentRoleDef[] {
 export function saveRoles(roles: AgentRoleDef[]): void {
   try {
     localStorage.setItem(KEY, JSON.stringify(roles));
+  } catch {
+    /* ignore */
+  }
+}
+
+const DEFAULT_CLI_KEY = "omnirift-default-cli";
+
+/** Le o CLI padrao (id do ROLE_CLIS). Default: claude. */
+export function getDefaultCli(): string {
+  try {
+    return localStorage.getItem(DEFAULT_CLI_KEY) ?? "claude";
+  } catch {
+    return "claude";
+  }
+}
+
+/** Define o CLI padrao para novos agentes/roles. */
+export function setDefaultCli(cliId: string): void {
+  try {
+    localStorage.setItem(DEFAULT_CLI_KEY, cliId);
   } catch {
     /* ignore */
   }

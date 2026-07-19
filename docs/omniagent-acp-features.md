@@ -31,6 +31,7 @@ Um novo tipo de nó no canvas, **aditivo** (coexiste com os terminais PTY).
 | **Claude** | OmniAgent via `@agentclientprotocol/claude-agent-acp` (herda `~/.claude`, zero setup) | Preset "OmniAgent" |
 | **Codex** | OmniAgent via `@agentclientprotocol/codex-acp` (GPT-5) | Preset "OmniAgent · Codex" |
 | **Hermes (BYOK)** | OmniAgent model-agnostic via `hermes-agent[acp]` (`uvx`) — **wizard** escolhe provider + modelo | Preset "OmniAgent · Hermes" |
+| **OpenCode** | OmniAgent via CLI nativo `opencode acp` (stdio ACP; config/auth do OpenCode) | Preset "OmniAgent · OpenCode" |
 | **Login (Entrar)** | Quando o provider exige (Codex): botão "Entrar com ChatGPT / API Key" | Card mostra sozinho |
 
 ### 2.1 Wizard do Hermes (provider → BYOK → modelo)

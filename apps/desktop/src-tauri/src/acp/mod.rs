@@ -29,13 +29,123 @@ pub type SessionId = String;
 /// Comando de launch do adapter ACP por provider → (binário, args). Claude/Codex via `npx`;
 /// Hermes (Nous Research, open-source) via `uvx` (roda o pacote python `hermes-agent[acp]` como
 /// subprocesso ACP — modelo-agnóstico: aponta pra Ollama/OpenRouter/API por `hermes model`).
+/// OpenCode via CLI nativo `opencode acp` (stdio JSON-RPC; resolve no PATH — sem path fixo).
 /// O `uvx` é achado via `inherit_login_shell_path()` (o PATH do login já inclui ~/.local/bin).
 fn adapter_cmd(provider: &str) -> (&'static str, Vec<&'static str>) {
     match provider {
         "codex" => ("npx", vec!["-y", "@agentclientprotocol/codex-acp"]),
         "hermes" => ("uvx", vec!["--from", "hermes-agent[acp]==0.17.0", "hermes-acp"]),
+        "opencode" => ("opencode", vec!["acp"]),
         _ => ("npx", vec!["-y", "@agentclientprotocol/claude-agent-acp"]),
     }
+}
+
+/// Monta o `Command` do adapter. No Windows, shims npm (opencode/npx/…) não são PE —
+/// CreateProcess não resolve PATHEXT → "not found". Embrulha em `cmd.exe /s /c` (mesma
+/// regra do PTY). PATH: prepende dirs npm **do ambiente** (`%APPDATA%\npm`, prefix do
+/// `npm config get prefix`) se existirem — zero path de máquina/usuário hardcoded.
+fn spawn_adapter_command(bin: &str, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    {
+        let lower = bin.to_lowercase();
+        let base = lower
+            .rsplit(|c| c == '\\' || c == '/')
+            .next()
+            .unwrap_or(&lower);
+        let needs_cmd = base != "cmd" && base != "cmd.exe" && !lower.ends_with(".exe");
+        if needs_cmd {
+            let comspec = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut inner = win_cmd_quote(bin);
+            for a in args {
+                inner.push(' ');
+                inner.push_str(&win_cmd_quote(a));
+            }
+            let mut cmd = Command::new(comspec);
+            cmd.arg("/s").arg("/c").arg(inner);
+            ensure_cli_path_env(&mut cmd);
+            return cmd;
+        }
+    }
+    let mut cmd = Command::new(bin);
+    cmd.args(args);
+    #[cfg(windows)]
+    ensure_cli_path_env(&mut cmd);
+    cmd
+}
+
+/// Prepende ao PATH do child dirs onde CLIs npm costumam viver — **só se existirem**,
+/// derivados de env vars do SO (`APPDATA`) e/ou `npm config get prefix` (cache 1×).
+/// Nada de user/home/máquina hardcoded.
+#[cfg(windows)]
+fn ensure_cli_path_env(cmd: &mut Command) {
+    use std::sync::OnceLock;
+    static NPM_PATH_EXTRAS: OnceLock<Vec<String>> = OnceLock::new();
+    let extras = NPM_PATH_EXTRAS.get_or_init(|| {
+        let mut extras: Vec<String> = Vec::new();
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let npm = std::path::PathBuf::from(appdata).join("npm");
+            if npm.is_dir() {
+                extras.push(npm.display().to_string());
+            }
+        }
+        // prefix global do npm (nvm/fnm/volta/custom) — se `npm` já estiver no PATH do app.
+        if let Ok(out) = std::process::Command::new("npm")
+            .args(["config", "get", "prefix"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        {
+            if out.status.success() {
+                let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !prefix.is_empty() {
+                    let p = std::path::PathBuf::from(&prefix);
+                    for cand in [&p, &p.join("bin")] {
+                        if cand.is_dir() {
+                            let s = cand.display().to_string();
+                            if !extras.iter().any(|e| e.eq_ignore_ascii_case(&s)) {
+                                extras.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        extras
+    });
+    if extras.is_empty() {
+        return;
+    }
+    let path = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = extras
+        .iter()
+        .filter(|e| !path.to_lowercase().contains(&e.to_lowercase()))
+        .cloned()
+        .collect();
+    if parts.is_empty() {
+        return;
+    }
+    parts.push(path);
+    cmd.env("PATH", parts.join(";"));
+}
+
+/// Quoting mínimo estilo argv Windows p/ o miolo do `cmd /c` (aspas se tiver espaço).
+#[cfg(windows)]
+fn win_cmd_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+    if !s.chars().any(|c| c.is_whitespace() || c == '"') {
+        return s.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        if c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }
 
 /// `npx` resolve no PATH? O bridge de orquestração (server `omnirift-agents`) sobe via
@@ -409,8 +519,10 @@ impl AcpManager {
         };
 
         let (bin, args) = adapter_cmd(provider.as_deref().unwrap_or("claude"));
-        let mut cmd = Command::new(bin);
-        cmd.args(&args);
+        // Windows: CLIs npm (opencode/claude/codex) são shims `.cmd`/script, não PE.
+        // CreateProcess (tokio::process) não resolve PATHEXT → "not found" / erro 193.
+        // Mesma regra do PTY (`needs_cmd_wrapper`): embrulha em `cmd.exe /s /c "…"`.
+        let mut cmd = spawn_adapter_command(bin, &args);
         cmd.current_dir(&cwd_abs);
 
         // Orquestrador PURO: bloqueia as tools de execução do Claude (Bash, Read, Edit,
@@ -446,9 +558,12 @@ impl AcpManager {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow!("falha ao spawnar adapter acp ({bin} {args:?}): {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            anyhow!(
+                "falha ao spawnar adapter acp ({bin} {args:?}): {e}. \
+                 Instale o CLI e garanta que está no PATH do sistema (Windows: `where {bin}`; Unix: `which {bin}`)."
+            )
+        })?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("adapter sem stdin"))?;
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("adapter sem stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| anyhow!("adapter sem stderr"))?;
@@ -836,6 +951,40 @@ Instale Node/npm ou garanta que `npx` esteja no PATH do app."
     /// Remove o registro (o nó desmontou). No-op se ausente.
     pub fn unregister_label(&self, label: &str) {
         self.labels.remove(label);
+    }
+
+    /// Renomeia OmniAgent comandável pela sessão (UI rename no canvas).
+    /// Retorna o label antigo se moveu; `None` se a sessão não estava mapeada.
+    pub fn rename_label_by_session(&self, session_id: &str, new_label: &str) -> Option<String> {
+        let new_label = new_label.trim();
+        if new_label.is_empty() {
+            return None;
+        }
+        let olds: Vec<String> = self
+            .labels
+            .iter()
+            .filter(|kv| kv.value() == session_id)
+            .map(|kv| kv.key().clone())
+            .collect();
+        if olds.is_empty() {
+            return None;
+        }
+        if olds.len() == 1 && olds[0] == new_label {
+            return Some(olds[0].clone());
+        }
+        if let Some(existing) = self.labels.get(new_label) {
+            if existing.as_str() != session_id {
+                log::warn!("[acp] rename recusado — label '{}' já é de outra sessão", new_label);
+                return None;
+            }
+        }
+        for l in &olds {
+            self.labels.remove(l);
+        }
+        let old = olds[0].clone();
+        self.labels.insert(new_label.to_string(), session_id.to_string());
+        log::info!("[acp] label renomeado '{}' → '{}' ({})", old, new_label, session_id);
+        Some(old)
     }
 
     /// Resolve o label de um OmniAgent → spawn id, se a sessão ainda existe (senão limpa

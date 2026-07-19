@@ -7,19 +7,40 @@ import { invoke } from "@tauri-apps/api/core";
 import { getFlag } from "./feature-flags";
 
 /** Registra um terminal como agente disponível para o Orquestrador.
- *  `floor` = nome do floor onde o agente vive (topologia cross-floor). */
+ *  `floor` = nome do floor onde o agente vive (topologia cross-floor).
+ *  `role` = AgentRole (opencode/claude-code/…) — opcional; re-registro sem role
+ *  preserva o role já gravado pelo pty_spawn no backend. */
 export async function mcpRegisterAgent(
   label: string,
   sessionId: string,
   description: string,
   floor?: string,
+  role?: string,
 ): Promise<void> {
-  await invoke("mcp_register_agent", { label, sessionId, description, floor: floor ?? null });
+  await invoke("mcp_register_agent", {
+    label,
+    sessionId,
+    description,
+    floor: floor ?? null,
+    role: role ?? null,
+  });
 }
 
 /** Remove um agente do registry (terminal fechado/renomeado). */
 export async function mcpUnregisterAgent(label: string): Promise<void> {
   await invoke("mcp_unregister_agent", { label });
+}
+
+/** Renomeia o agente no registry MCP/ACP pela sessão (UI rename no canvas).
+ *  Sem isto o Orquestrador continua vendo o nome antigo no terminal_list. */
+export async function mcpRenameAgentBySession(
+  sessionId: string,
+  newLabel: string,
+): Promise<string | null> {
+  return invoke<string | null>("mcp_rename_agent_by_session", {
+    sessionId,
+    newLabel,
+  });
 }
 
 /** Lista os agentes atualmente registrados. */
@@ -50,6 +71,22 @@ export async function getMaxAgents(): Promise<number> {
  */
 export async function agentMcpConfig(allowed?: string[]): Promise<string | null> {
   return invoke<string | null>("agent_mcp_config", allowed ? { allowed } : undefined);
+}
+
+/**
+ * Caminho do `agent-opencode-mcp.json` (formato OpenCode: chave `mcp`, bridge
+ * local via mcp-remote → SSE do OmniRift). Injetado no spawn do opencode via
+ * env `OPENCODE_CONFIG` — merge, não sobrescreve model/provider do usuário.
+ * Null se indisponível.
+ */
+export async function agentOpencodeMcpConfig(): Promise<string | null> {
+  return invoke<string | null>("agent_opencode_mcp_config");
+}
+
+/** Env pairs pra spawn de opencode com MCP omnirift-agents (OPENCODE_CONFIG). */
+export async function openCodeOrchestrationEnv(): Promise<Array<[string, string]>> {
+  const path = await agentOpencodeMcpConfig().catch(() => null);
+  return path ? [["OPENCODE_CONFIG", path]] : [];
 }
 
 /** Um MCP server disponível + custo estimado de contexto (tokens de schema). */

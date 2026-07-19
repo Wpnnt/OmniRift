@@ -86,8 +86,8 @@ use commands::git::{
     parallel_run_hook, git_repo_info,
 };
 use commands::mcp::{
-    agent_mcp_config, parallel_mirror_set, canvas_agents_set, get_max_agents, mcp_inventory, mcp_list_agents, mcp_register_agent,
-    mcp_server_url, mcp_unregister_agent, save_paste_image, set_max_agents,
+    agent_mcp_config, agent_opencode_mcp_config, parallel_mirror_set, canvas_agents_set, get_max_agents, mcp_inventory, mcp_list_agents, mcp_register_agent,
+    mcp_rename_agent_by_session, mcp_server_url, mcp_unregister_agent, save_paste_image, set_max_agents,
 };
 use commands::memory::{
     memory_active, memory_connect, memory_migrate, memory_migrate_preview, memory_providers_list,
@@ -431,6 +431,7 @@ pub fn run() {
             workspace_load,
             mcp_register_agent,
             mcp_unregister_agent,
+            mcp_rename_agent_by_session,
             mcp_list_agents,
             mcp_server_url,
             set_max_agents,
@@ -473,6 +474,7 @@ pub fn run() {
             reminder_set_done,
             reminder_delete,
             agent_mcp_config,
+            agent_opencode_mcp_config,
             mcp_inventory,
             git_repo_info,
             parallel_git_create,

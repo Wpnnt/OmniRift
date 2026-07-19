@@ -235,6 +235,31 @@ struct SpawnParams {
     execution_host: Option<String>,
 }
 
+/// Infere AgentRole a partir do basename do command (CLI `omnirift spawn opencode`).
+fn infer_role_from_command(command: &str) -> Option<String> {
+    let base = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_lowercase();
+    let base = base.trim_end_matches(".exe").trim_end_matches(".cmd");
+    if base.contains("claude") {
+        Some("claude-code".into())
+    } else if base.contains("codex") {
+        Some("codex".into())
+    } else if base.contains("opencode") {
+        Some("opencode".into())
+    } else if base.contains("antigravity") || base == "agy" {
+        Some("antigravity".into())
+    } else if base.contains("grok") {
+        Some("grok".into())
+    } else if base == "bash" || base == "powershell" || base == "pwsh" || base == "cmd" || base == "zsh" {
+        Some("shell".into())
+    } else {
+        None
+    }
+}
+
 impl SpawnParams {
     /// Valida o invariante de segurança: `command` não-vazio (após trim). O spawn é via
     /// argv/portable-pty (sem shell — `CommandBuilder::new(command).args(args)`), então
@@ -274,16 +299,34 @@ fn agent_spawn(params: Value, ctx: &RpcContext) -> Result<Value, RpcError> {
     let session_id = uuid::Uuid::new_v4().to_string();
     // label default = o command (mesma heurística amigável do front).
     let label = p.label.clone().unwrap_or_else(|| p.command.clone());
+    let role = infer_role_from_command(&p.command);
+
+    // OpenCode: injeta OPENCODE_CONFIG com omnirift-agents MCP (paridade com buildRoleSpawn).
+    let mut env: Vec<(String, String)> = Vec::new();
+    if role.as_deref() == Some("opencode") {
+        if let (Some(token), Ok(dir)) = (
+            ctx.app
+                .try_state::<Arc<crate::mcp::server::McpAuthToken>>()
+                .map(|t| t.0.clone()),
+            ctx.app.path().app_data_dir(),
+        ) {
+            if let Some(path) = crate::commands::mcp::write_opencode_mcp_config(&dir, &token) {
+                env.push(("OPENCODE_CONFIG".into(), path));
+            }
+        }
+    }
 
     // Monta o PtySpawnConfig EXATAMENTE como o pty_spawn (cols/rows/env via Default do serde).
     let cfg = PtySpawnConfig {
         command: p.command.clone(),
         args: p.args.clone(),
         cwd: p.cwd.clone(),
-        env: Vec::new(),
+        env,
         cols: 80,
         rows: 24,
         execution_host: p.execution_host.clone(),
+        label: Some(label.clone()),
+        role: role.clone(),
     };
 
     manager
@@ -293,8 +336,17 @@ fn agent_spawn(params: Value, ctx: &RpcContext) -> Result<Value, RpcError> {
     // Registra no AgentRegistry → o agente aparece em `agents.list`/`status` + no orquestrador
     // (mesmo caminho do spawn via MCP em tools.rs). Sem isto o PTY roda mas fica invisível pra
     // `omnirift agents`. floor=None (CLI não nasce num floor); description = o command.
+    // Role inferido pelo basename do command (opencode/claude/codex) → @role:X no MCP.
+    // Nota: pty_spawn também registra se label vier no config — aqui registramos de novo
+    // com description = command (CLI path) e role inferido (pty_spawn usa o do config).
     if let Some(reg) = ctx.app.try_state::<Arc<AgentRegistry>>() {
-        reg.register(label.clone(), session_id.clone(), p.command.clone(), None);
+        reg.register_with_role(
+            label.clone(),
+            session_id.clone(),
+            p.command.clone(),
+            None,
+            role,
+        );
     }
 
     // Avisa o frontend pra attachar um TerminalNode na sessão JÁ spawnada (não re-spawna).

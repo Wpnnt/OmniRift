@@ -1,13 +1,14 @@
 use crate::pty::emulator::SCROLLBACK_LIMIT;
 use crate::pty::manager::{relay_task, ProcInfo};
 use crate::pty::{PtyManager, PtySnapshot, PtySpawnConfig, SessionId};
-use tauri::{AppHandle, State};
+use std::sync::Arc;
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub fn pty_spawn(
     id: SessionId,
     config: PtySpawnConfig,
-    manager: State<'_, std::sync::Arc<PtyManager>>,
+    manager: State<'_, Arc<PtyManager>>,
     app: AppHandle,
 ) -> Result<SessionId, String> {
     // Guard OmniFS (F2 item 7): cwd dentro do mount FUSE conhecido com o daemon
@@ -16,7 +17,30 @@ pub fn pty_spawn(
     // Choke-point único: cobre Sidebar, restore, pipeline e mobile. Barato —
     // 1 JSON pequeno + 1 connect local, só quando o cwd bate no prefixo do mount.
     crate::omnifs::preflight_cwd_guard(config.cwd.as_deref())?;
-    manager.spawn(id, config, app).map_err(|e| format!("{e:#}"))
+    
+    let label = config.label.clone();
+    let role = config.role.clone();
+    let floor = config.cwd.as_ref().and_then(|p| {
+        std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from)
+    });
+    
+    let result = manager.spawn(id.clone(), config, app.clone());
+    
+    // Registry é `Arc<AgentRegistry>` (manage no boot) — try_state evita panic se
+    // o state ainda não estiver disponível; fail-soft (PTY sobe mesmo sem registry).
+    if result.is_ok() {
+        if let Some(label_str) = label {
+            if let Some(registry) = app.try_state::<Arc<crate::mcp::AgentRegistry>>() {
+                let desc = format!("{} (PTY)", role.as_deref().unwrap_or("agente"));
+                registry.register_with_role(label_str, id.clone(), desc, floor, role);
+            }
+        }
+    }
+    
+    result.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -41,8 +65,19 @@ pub fn pty_resize(
 #[tauri::command]
 pub fn pty_kill(
     session_id: SessionId,
-    manager: State<'_, std::sync::Arc<PtyManager>>,
+    manager: State<'_, Arc<PtyManager>>,
+    app: AppHandle,
 ) -> Result<(), String> {
+    if let Some(registry) = app.try_state::<Arc<crate::mcp::AgentRegistry>>() {
+        let removed = registry.unregister_by_session(&session_id);
+        if !removed.is_empty() {
+            log::info!(
+                "MCP: agentes desregistrados no kill de {}: {:?}",
+                &session_id[..8.min(session_id.len())],
+                removed
+            );
+        }
+    }
     manager.kill(&session_id).map_err(|e| format!("{e:#}"))
 }
 

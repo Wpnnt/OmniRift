@@ -31,6 +31,16 @@ pub struct PtySpawnConfig {
     /// pra o resto do código não ramificar por transporte; só `build_command` lê.
     #[serde(default)]
     pub execution_host: Option<String>,
+    /// Label do agente pra registro no AgentRegistry (orquestração via MCP).
+    /// `None` = não registra (shell puro ou agente sem label). Setado quando
+    /// CLI != "shell" — opencode/claude/codex/etc ficam orquestráveis via
+    /// terminal_send_text/@label. Campo opcional: spawn sem label = back-compat.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Role do agente (opencode/claude-code/codex/etc) pra filtro @role:X.
+    /// `None` = shell ou role desconhecido. Usado pelo resolve_group do MCP.
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 fn default_cols() -> u16 { 80 }
@@ -708,6 +718,8 @@ mod tests {
                 cols: 80,
                 rows: 24,
                 execution_host: None,
+                label: None,
+                role: None,
             }
         }
 
@@ -831,6 +843,8 @@ mod tests {
             cols: 80,
             rows: 24,
             execution_host: host.map(|h| h.to_string()),
+            label: None,
+            role: None,
         }
     }
 

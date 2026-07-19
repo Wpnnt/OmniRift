@@ -23,7 +23,7 @@ import { ptyWrite } from "@/lib/pty-client";
 import { copyText, pasteText, readClipboardPng, savePastePng, MAX_PASTE_BYTES, utf8ByteLength } from "@/lib/clipboard";
 import { compressorSavings, isCompressorEnabled, type SavingsReport } from "@/lib/compress-client";
 import { CLI_CATALOG, clisList, type CliInfo } from "@/lib/clis-client";
-import { agentMcpConfig, agentSettingsConfig } from "@/lib/mcp-client";
+import { agentMcpConfig, agentOpencodeMcpConfig, agentSettingsConfig, mcpRenameAgentBySession } from "@/lib/mcp-client";
 import { ROLE_CLIS, extractPersona, buildCliSwitch, loadRoles, type AgentRoleDef } from "@/lib/agent-roles";
 import { buildRoleSpawn } from "@/lib/agent-spawn";
 import { cn } from "@/lib/cn";
@@ -148,6 +148,9 @@ function TerminalNodeBase({ id, data, selected }: TerminalNodeProps) {
         // Attach (Fase 2 do #8): true quando o PTY já nasceu no backend (CLI
         // `omnirift spawn` → `rpc://agent-spawned`). O hook anexa em vez de spawnar.
         attach: data.attach,
+        // Orquestração MCP: label no AgentRegistry (opencode/claude/codex).
+        label: data.label,
+        role: data.role !== "shell" ? data.role : undefined,
       },
       // Ctrl+V no terminal reutiliza o MESMO handler do menu de contexto (texto →
       // senão imagem→caminho). Antes o Ctrl+V só colava texto; imagem (print) sumia.
@@ -202,20 +205,32 @@ function TerminalNodeBase({ id, data, selected }: TerminalNodeProps) {
       // No-op: já é este CLI/role → não re-spawna à toa (evita matar um agente vivo sem motivo).
       if (cli.command === data.command && cli.role === data.role) return;
       const persona = extractPersona(data.args);
-      const [mcpPath, settingsPath] = await Promise.all([
+      const [mcpPath, settingsPath, openCodePath] = await Promise.all([
         cli.role === "claude-code" ? agentMcpConfig().catch(() => null) : Promise.resolve(null),
         cli.role === "claude-code"
           ? agentSettingsConfig(data.label ?? cli.label).catch(() => null)
           : Promise.resolve(null),
+        cli.role === "opencode" ? agentOpencodeMcpConfig().catch(() => null) : Promise.resolve(null),
       ]);
-      const built = buildCliSwitch({ cli, persona, mcpConfigPath: mcpPath, settingsPath });
-      patchNode(data.id, { command: built.command, args: built.args, role: built.role });
+      const built = buildCliSwitch({
+        cli,
+        persona,
+        mcpConfigPath: mcpPath,
+        settingsPath,
+        openCodeConfigPath: openCodePath,
+      });
+      const nextEnv = built.env?.length
+        ? [...(data.env ?? []).filter(([k]) => !built.env!.some(([bk]) => bk === k)), ...built.env]
+        : data.env;
+      patchNode(data.id, { command: built.command, args: built.args, role: built.role, env: nextEnv });
       await reconnect(undefined, {
         command: built.command,
         args: built.args,
         cwd: data.cwd,
-        env: data.env,
+        env: nextEnv,
         execution_host: data.executionHost,
+        label: data.label,
+        role: built.role !== "shell" ? built.role : undefined,
       });
       // CLI sem flag → persona como 1ª mensagem quando ready (grace 1.5s, guarda 120s).
       const first = built.firstMessage;
@@ -262,13 +277,21 @@ function TerminalNodeBase({ id, data, selected }: TerminalNodeProps) {
       const role = loadRoles().find((r) => r.id === roleId);
       if (!role) return;
       const built = await buildRoleSpawn(role);
-      patchNode(data.id, { command: built.command, args: built.args, role: built.role });
+      patchNode(data.id, {
+        command: built.command,
+        args: built.args,
+        role: built.role,
+        env: built.env,
+        label: built.label ?? role.name,
+      });
       await reconnect(undefined, {
         command: built.command,
         args: built.args,
         cwd: data.cwd,
         env: built.env ?? data.env,
         execution_host: data.executionHost,
+        label: built.label ?? role.name,
+        role: built.role !== "shell" ? built.role : undefined,
       });
       // Injeção pós-spawn (mesma do spawnRole). sendLine = escreve + Enter após delay;
       // injectWhenReady = espera o terminal ficar idle/done pra então enviar.
@@ -416,10 +439,37 @@ function TerminalNodeBase({ id, data, selected }: TerminalNodeProps) {
 
   function commitRename() {
     const label = draft.trim() || data.command;
+    const prev = data.label ?? data.command;
     renameNode(id, label);
     setDraft(label);
     setEditing(false);
+    // Sync AgentRegistry/ACP: o Orquestrador resolve por label — renomear só no
+    // canvas deixava "Nome" invisível em terminal_list (ficava o nome antigo).
+    if (label !== prev) {
+      mcpRenameAgentBySession(data.session_id, label).catch(console.warn);
+      // Âncora de re-link pós-restart (omnirift-mcp-labels) também usa o label.
+      try {
+        const raw = localStorage.getItem("omnirift-mcp-labels");
+        if (raw) {
+          const keys: string[] = JSON.parse(raw);
+          const i = keys.indexOf(prev);
+          if (i >= 0) {
+            keys[i] = label;
+            localStorage.setItem("omnirift-mcp-labels", JSON.stringify(keys));
+          }
+        }
+      } catch { /* ignore */ }
+    }
   }
+
+  // Se o label do canvas mudou (rename, restore, patch) e a sessão está no registry
+  // com outro nome, alinha. Cobre o caso "já renomeei mas o MCP ficou
+  // com OpenCode" sem precisar renomear de novo.
+  useEffect(() => {
+    const label = (data.label ?? "").trim();
+    if (!label || !data.session_id) return;
+    mcpRenameAgentBySession(data.session_id, label).catch(() => {});
+  }, [data.label, data.session_id]);
 
   // Coloca o xterm no destino certo, por prioridade: fullscreen > dock (se for o
   // Orquestrador) > slot do próprio nó. Move o ELEMENTO (appendChild) — nunca

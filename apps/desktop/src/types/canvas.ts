@@ -204,8 +204,8 @@ export interface HtmlNode extends BaseCanvasNode {
 
 export interface AgentNode extends BaseCanvasNode {
   kind: "agent";
-  /** Provider ACP: qual adapter de agente fala o protocolo (claude | codex | hermes). Default claude. */
-  provider?: "claude" | "codex" | "hermes";
+  /** Provider ACP: qual adapter de agente fala o protocolo (claude | codex | hermes | opencode). Default claude. */
+  provider?: "claude" | "codex" | "hermes" | "opencode";
   /** Nome amigável do agente. */
   label?: string;
   /** Diretório de trabalho passado ao adapter ACP (resolvido p/ absoluto no backend). */
@@ -405,7 +405,7 @@ export interface CanvasNodePatch {
   comment?: string;
   tag?: string;
   providerConfig?: { provider: string; model: string };
-  provider?: "claude" | "codex" | "hermes";
+  provider?: "claude" | "codex" | "hermes" | "opencode";
   goal?: { objective: string; condition: string; maxIter: number };
   loop?: { prompt: string; everyMin: number; active: boolean };
   /** 📿 Recitação (Manus): reinjeta o foco no loop. Ausente/true = ligado; false = desligado. */

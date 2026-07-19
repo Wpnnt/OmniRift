@@ -50,6 +50,29 @@ fn resolve(state: &McpState, terminal: &str) -> Result<String, String> {
         .ok_or_else(|| format!("terminal '{terminal}' não encontrado (use terminal_list)"))
 }
 
+/// Infere AgentRole pelo basename do command (terminal_spawn sem role).
+fn infer_cli_role(command: &str) -> Option<String> {
+    let base = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_lowercase();
+    let base = base.trim_end_matches(".exe").trim_end_matches(".cmd");
+    if base.contains("claude") {
+        Some("claude-code".into())
+    } else if base.contains("codex") {
+        Some("codex".into())
+    } else if base.contains("opencode") {
+        Some("opencode".into())
+    } else if base.contains("antigravity") || base == "agy" {
+        Some("antigravity".into())
+    } else if base.contains("grok") {
+        Some("grok".into())
+    } else {
+        None
+    }
+}
+
 /// Se `terminal` é um OmniAgent (ACP) registrado, roteia o texto como um PROMPT (turno)
 /// via AcpManager e devolve `Some(resposta)`. Senão `None` (cai no caminho PTY normal).
 /// Pra um agente ACP, "send_text" e "run" significam ambos "mande isto como prompt" —
@@ -294,7 +317,7 @@ pub fn terminal_tool_defs() -> Vec<Value> {
                 O agente nasce no floor especificado, com o CLI e role dados.",
             "inputSchema": { "type": "object", "properties": {
                 "name": { "type": "string", "description": "nome do agente no canvas" },
-                "cli": { "type": "string", "enum": ["claude", "codex", "hermes", "shell"], "description": "qual CLI o agente usa" },
+                "cli": { "type": "string", "enum": ["claude", "codex", "opencode", "hermes", "shell"], "description": "qual CLI o agente usa" },
                 "model": { "type": "string", "description": "modelo (null = default do CLI)" },
                 "floor": { "type": "string", "description": "active | new:<branch> | <floor-id>", "default": "active" },
                 "role": { "type": "string", "description": "role/persona do agente" },
@@ -934,7 +957,20 @@ pub async fn terminal_dispatch(state: &McpState, tool: &str, args: Value) -> Str
             state.app.unlisten(listener_id);
 
             let floor = active_floor_name(state);
-            state.agent_registry.register(label.clone(), id.clone(), command.clone(), floor);
+            // Frontend passa role via autoRegisterMcp → backend preserva (source of truth).
+            // Só infere se role vazio (spawn direto sem role, back-compat).
+            let role_eff = if !role.is_empty() {
+                Some(role)
+            } else {
+                infer_cli_role(&command)
+            };
+            state.agent_registry.register_with_role(
+                label.clone(),
+                id.clone(),
+                command.clone(),
+                floor,
+                role_eff,
+            );
 
             if acked {
                 format!("criado: {label} (id {id})")
@@ -982,7 +1018,19 @@ pub async fn terminal_dispatch(state: &McpState, tool: &str, args: Value) -> Str
             state.app.unlisten(listener_id);
 
             // Registra com floor = branch (topologia cross-floor pro Orquestrador).
-            state.agent_registry.register(label.clone(), id.clone(), command.clone(), Some(branch.clone()));
+            // Frontend passa role → backend preserva (source of truth). Só infere se vazio.
+            let role_eff = if !role.is_empty() {
+                Some(role)
+            } else {
+                infer_cli_role(&command)
+            };
+            state.agent_registry.register_with_role(
+                label.clone(),
+                id.clone(),
+                command.clone(),
+                Some(branch.clone()),
+                role_eff,
+            );
 
             // Injeta a tarefa depois que o agente sobe (deixa a TUI assentar).
             if acked && !task.is_empty() {
